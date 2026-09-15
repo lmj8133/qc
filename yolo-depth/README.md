@@ -11,6 +11,10 @@ uv sync
 
 Output: `artifacts/y26n_<imgsz>_fp16_v73.bin` — copy to the board and run with `qnn-net-run`.
 
+Note: the build rewrites `graph_names` in `artifacts/htp_cfg_v73.json` to match the size
+being built, so that file shows up as modified after a non-768 build. That is expected churn,
+not a real edit — `git checkout` it if you do not intend to commit a new default.
+
 ## Why not `yolo export format=qnn`
 
 That path compiles the context binary with the QAIRT bundled in `onnxruntime-qnn` (>= 2.45).

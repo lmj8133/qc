@@ -28,6 +28,7 @@
 | 9 | 長指令貼上截斷 | （非驗證項，除錯指南） | — | 本次最耗時的問題，共發生 4 次 |
 | 10 | 板載 Camera ×5 | MIPI camera preview | ⚠️ 未測 | 板上無 module；且 DT sensor 型號與文件不符 |
 | 11 | USB Camera | UVC 擷取與 HDMI 預覽 | ✅ | AVerMedia PW310P；反證影像鏈路正常 |
+| 15 | 開機行為 | 上電後為何不自己開機 | ⚠️ 設計行為 | **需插 USB 觸發 PON**；非故障，見 §15 |
 
 **環境**
 
@@ -845,6 +846,8 @@ gst-launch-1.0 v4l2src device=/dev/video2 ! \
 
 退出 EDL：斷 12V 與 USB → SW1701 Pin 1 撥回 OFF → **先接 12V，再接 Type-C**（順序不可顛倒）。
 
+> 順序之所以重要，是因為 Type-C 的 VBUS 才是實際觸發開機的訊號 —— 原理見 **§15**。
+
 | USB ID | 模式 | 意義 |
 |---|---|---|
 | `05c6:901d` | Mission | 正常開機，adb 可用，腳本會自動切 EDL |
@@ -852,3 +855,57 @@ gst-launch-1.0 v4l2src device=/dev/video2 ! \
 | 無 | — | 無供電/連線，或需硬體強制 EDL |
 
 UART 登入：`root` / `oelinux123`（燒錄後的 Ubuntu 映像）。
+
+---
+
+## 15. ⚠️ 上電後不會自己開機 —— 需 USB VBUS 觸發
+
+**現象**：接上 12V 主電源後板子毫無反應（無 UART 輸出、網路不通、adb 看不到），
+插上筆電（Type-C）才開機。容易誤判為板子故障或電源供應器問題。
+
+**這是 PMIC 的設計行為，不是故障。** 板子自己的 PON log 寫得很明確：
+
+```bash
+dmesg | grep "PMIC PON log"
+cat /sys/kernel/debug/ipc_logging/pmic_pon/log     # 完整開關機序列
+```
+
+```
+State=OFF;  PON Trigger: USB_CHARGER      ← 開機由 USB VBUS 觸發
+State=PON;  Begin PON Sequence
+State=PON;  Waiting on PS_HOLD
+State=ON;   PON Successful
+```
+
+觸發源是 **`USB_CHARGER`**，而非 `KPDPWR`（電源鍵）或 `SMPL`（掉電自動復電）。
+
+**原因**：QCS8550 的 PMIC（pmk8550）沿用 Qualcomm 手機平台行為，
+把 **Type-C 的 VBUS 視為合法的開機事件源**（手機插上充電器本來就該亮）。
+在開發板上就表現為：
+
+> 12V 上電 → PMIC 僅進入 OFF/待機（PS_HOLD 未拉起）→ 插入 USB → VBUS 觸發 PON → 才真正開機
+
+這也解釋了 §14 為何強調「**先接 12V，再接 Type-C**，順序不可顛倒」 ——
+Type-C 是實際按下的那顆「電源鍵」。
+
+**排查順序**（板子沒反應時，先確認這個再懷疑硬體）：
+
+| 現象 | 判讀 |
+|---|---|
+| 12V 已接、USB 未接、無反應 | 正常，尚未觸發 PON |
+| 插上 USB 後開機 | 正常行為 |
+| 插上 USB 仍無反應 | 才需懷疑供電/板子/EDL |
+
+> **未驗證**：推論 USB 端只需提供 VBUS，與對端是不是筆電無關 ——
+> 理論上一般 USB 充電器或行動電源即可。尚未實測，若成立則不必為了開機佔用筆電。
+> 若要改成「上電即開」需調整 device tree 的 PMIC PON 設定，屬於改開機行為，需重新燒錄。
+
+### 附帶發現：RTC 無電池
+
+```
+rtc-pm8xxx ... setting system clock to 1970-01-01T00:00:05 UTC
+```
+
+每次開機系統時間都歸零到 1970，需靠 NTP 或手動校時。副作用是
+`journalctl --list-boots` 只認得到本次 boot，**歷史開機紀錄無法回溯** ——
+要查前幾次開機原因，只能靠上面的 `pmic_pon` log。

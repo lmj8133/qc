@@ -406,13 +406,45 @@ DLC 邊界保持 NCHW，內部自行插 Transpose 轉 NHWC，所以餵 NCHW 是�
 |---|---|---|
 | 1 | 能否匯出 QNN / TFLite？ | **能**。QNN 轉換成功，無不支援的 op。（TFLite 未測） |
 | 2 | HTP（NPU）能接管多少 op？ | **100%** —— 329 個 op 融成單一 partition，零 CPU fallback |
-| 3 | 實際延遲？ | **~40 ms/frame（~25 FPS）**，20 次平均、accelerator 時間 39.6 ms |
+| 3 | 實際延遲？ | **~40 ms/frame（~25 FPS）** @768px；已拆解，見下表 |
 
 初版警告「不可用 T4 的 2.7ms 推估」是對的：實測 40 ms，約為 T4+TensorRT 的 **15 倍**。
 
+### 延遲拆解（100 次，檔案置於 tmpfs 以排除磁碟 I/O）
+
+| 層級 | 時間 | 增量 |
+|---|---|---|
+| **Accelerator（不含等待）** | **39.4 ms** | ← **純 NPU 運算，真正的瓶頸** |
+| Accelerator | 39.6 ms | +0.2 ms 等待 |
+| RPC | 41.0 ms | +1.4 ms fastRPC |
+| QNN 總計 | 41.9 ms | +0.9 ms 框架 |
+
+**overhead 僅 2.5 ms（6%）**，分布極穩（min 39.4 / max 41.0 ms）。
+
+**`--perf_profile` 無效**：`default` / `balanced` / `high_performance` /
+`sustained_high_performance` / `burst` 五者差異 **<0.05%**（39.61–39.63 ms）——
+NPU 本來就跑滿，不存在 DVFS 節流，此路不通。
+
+> 首次推論含 **HVX + HMX power-on 約 23 ms** 的暖機成本，之後降至約 5 ms。量測穩態延遲時應捨棄前幾次。
+
+### 解析度是唯一有效的槓桿
+
+延遲與像素數近乎完全線性，且 FP16 精度在各尺寸皆保持 corr ≥ 0.9997：
+
+| imgsz | 延遲 | FPS | 對照同尺寸 ONNX |
+|---|---|---|---|
+| 384 | **9.5 ms** | **105** | corr 0.99984 / MAE 0.030 m |
+| 512 | 17.5 ms | 57 | corr 0.99968 / MAE 0.024 m |
+| 640 | 28.6 ms | 35 | corr 0.99976 / MAE 0.013 m |
+| 768 | 39.6 ms | 25 | corr 0.99976 / MAE 0.012 m |
+
+四種尺寸的 binary 皆可用 `./build_qnn.sh <size>` 產生。
+
+> 上表 MAE 衡量的是 **FP16 轉換誤差**（板上 vs 同尺寸 ONNX），
+> **不是深度估計的絕對精度** —— 低解析度模型對細節的還原本就較差，那需跑 NYU val 654 張才能評估。
+
 ### 尚未驗證
 
-- **延遲未拆解** —— 40 ms 含檔案 I/O 與 fastRPC 來回，純 NPU compute 應更低
 - **精度僅比對 2 張圖** —— 未跑 NYU val 654 張完整 Delta1/RMSE，無法對照官方 0.882 / 0.414m
 - **端到端 pipeline 未做**（原階段四）—— 板上**沒有 onnxruntime**、沒有 pip、Python 僅 3.10
   （`onnxruntime-qnn` wheel 從 cp311 起跳），因此要走 `qnn-net-run` 或 QNN C API 接 GStreamer
@@ -436,6 +468,7 @@ DLC 邊界保持 NCHW，內部自行插 Transpose 轉 NHWC，所以餵 NCHW 是�
 | 音訊環境變數 | 文件的 `XDG_RUNTIME_DIR=/run/user/root` 在 root 身分下不可用，改用 `PULSE_SERVER=unix:/run/pulse/native` |
 | adb 權限 | uid 2000，讀不到 `/root`、`/etc/shadow` 等，需要 root 時用 SSH 或 `adb root` |
 | 長指令貼上 | 從 markdown 複製多行指令易被截斷，建議寫成腳本或用 heredoc |
+| **上電不會自己開機** | 接 12V 後板子無反應屬正常 —— PMIC 需 **Type-C 的 VBUS** 觸發 PON 才開機。別誤判為故障，詳見 `VERIFICATION-2026-09-14.md` §15 |
 
 ### ⚠️ IP 為 DHCP 配發，會變動
 
