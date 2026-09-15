@@ -1,0 +1,182 @@
+# Real-time monocular depth pipeline (QCS8550 / Hexagon V73)
+
+`depth_cam.c` is the whole pipeline in one C program:
+
+```
+V4L2 YUYV capture -> YUY2->RGB -> centre-crop + bilinear scale to SxS
+  -> normalize to fp16 NCHW -> QNN graphExecute (resident graph)
+  -> turbo colourize -> BGRA -> GStreamer waylandsink
+```
+
+The QNN setup is lifted from `../bench/qnn_bench.c`, including the System API
+`BinaryInfo`/`GraphInfo` V1/V2/V3 handling (these binaries declare V3; assuming
+V1 fails outright). The context binary is loaded **once** and the graph stays
+resident — spawning `qnn-net-run` per frame costs ~594 ms of wall clock each.
+
+Everything the per-frame loop touches is allocated before the loop starts. The
+loop performs zero `malloc`/`free`.
+
+## Build
+
+```bash
+./build.sh [board-ip]        # default 192.168.3.80
+```
+
+Copies the source to `/dev/shm` and compiles natively (the board has gcc):
+
+```bash
+gcc -O3 -march=armv8.2-a+fp16 -Wall -Wextra -o depth_cam depth_cam.c \
+    -I/opt/qcom/qirp-sdk/include -ldl -lm
+```
+
+Stage a context binary once:
+
+```bash
+scp ../artifacts/y26n_640_fp16_v73.bin root@192.168.3.80:/dev/shm/
+```
+
+## Run
+
+On the board, always source the SDK first:
+
+```bash
+source /opt/qcom/qirp-sdk/qirp-setup.sh >/dev/null 2>&1
+export LD_LIBRARY_PATH=/opt/qcom/qirp-sdk/lib/aarch64-oe-linux-gcc11.2:$LD_LIBRARY_PATH
+cd /dev/shm
+
+./depth_cam --model y26n_640_fp16_v73.bin --frames 300 --no-display   # benchmark
+./depth_cam --model y26n_640_fp16_v73.bin --frames 300                # with display
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--model <path>` | *(required)* | QNN context binary |
+| `--device <path>` | `/dev/video2` | V4L2 capture device |
+| `--size <N>` | 640 | Model input side; **overridden by the binary's own shape** |
+| `--frames <N>` | 300 | 0 = run until Ctrl-C |
+| `--stats-every <N>` | 30 | Frames between stats lines |
+| `--no-display` | off | Headless benchmark |
+| `--no-pin` | off | Disable CPU pinning (see below) |
+| `--help` | | Usage with an example |
+
+Exit code 0 on success, non-zero on failure.
+
+## Measured performance — 640x640 model, 300 frames
+
+Headless (`--no-display`):
+
+```
+--- summary (299 frames timed, frame 0 discarded as warm-up) ---
+warm-up frame 0  : 276.8 ms
+capture          :   0.04 ms
+preprocess       :  11.64 ms   (YUY2->RGB, crop 480x480, scale 640x640, fp16 NCHW)
+inference        :  31.03 ms   (QNN HTP, resident graph)
+colourize        :   2.31 ms
+display          :   0.00 ms   (disabled)
+sum of stages    :  45.02 ms
+end-to-end       :  45.03 ms   -> 22.2 FPS
+```
+
+With display (`waylandsink`):
+
+```
+capture          :   0.04 ms
+preprocess       :   8.11 ms
+inference        :  30.76 ms
+colourize        :   2.17 ms
+display          :   8.26 ms   (waylandsink)
+end-to-end       :  49.35 ms   -> 20.3 FPS
+```
+
+One-time context load: 140-170 ms. Inference matches the standalone benchmark
+(32.2 ms at 640), so nothing in the pipeline is stealing NPU time.
+
+Display costs ~8 ms/frame of *producer-blocking* time: the `write()` to the
+GStreamer child blocks once the sink's queue is full, so it doubles as the
+pacing mechanism. It is real cost, not measurement overhead.
+
+## Model size: 512 is the one to use
+
+End-to-end, 300+ frames each, headless and pinned:
+
+| size | preprocess | inference | total | **FPS** | limited by |
+|---|---|---|---|---|---|
+| 384 | ~7 ms | 11.3 ms | 33.3 ms | **30.1** | **camera** |
+| **512** | 7.79 ms | 19.4 ms | 33.3 ms | **30.1** | **camera** |
+| 640 | 11.6 ms | 30.9 ms | 44.8 ms | 22.4 | compute |
+| 768 | ~15 ms | 42.0 ms | 60.7 ms | 16.5 | compute |
+
+**512 is the sweet spot.** It hits the 30 FPS camera ceiling, so 384 buys nothing — both are
+camera-limited, and 384 only loses accuracy. 640 misses 30 FPS because inference alone (30.9 ms)
+almost exhausts the 33.3 ms budget before preprocessing is counted.
+
+The stages are strictly serial, so they add. Getting 640 to 30 FPS would need preprocessing
+overlapped with inference (double-buffer + thread) or the resize moved off the CPU.
+
+## CPU pinning is load-bearing, not a micro-optimization
+
+This SoC is a 3+4+1 big.LITTLE: cpu0-2 cap at 2.02 GHz, cpu3-6 at 2.80 GHz,
+cpu7 at 3.19 GHz. Measured cost of the 480->640 bilinear + CHW pass:
+
+| core | ms |
+|---|---|
+| cpu0 (little) | 16.40 |
+| cpu4 (big) | 6.16 |
+| cpu7 (prime) | 3.32 |
+
+Left unpinned the scheduler drifts the loop onto a little core:
+
+| | preprocess | end-to-end |
+|---|---|---|
+| unpinned | 26.8 ms | **14.5 FPS** |
+| pinned to cpu7 | 11.4 ms | **22.4 FPS** |
+
+So the program pins itself to the highest-frequency core at startup (`--no-pin`
+disables it). This also corrects an earlier note: the "0.75 ms preprocessing"
+figure in `NOTES-capture-display.md` measured *only* the HWC->CHW normalize of
+an already-correctly-sized buffer, on a core that happened to be fast. The real
+stage additionally does YUY2->RGB (~1.4 ms) and the bilinear resize (~10 ms),
+because the camera's 480x480 crop has to be **up**scaled to 640x640.
+
+**The resize is now the only CPU stage that matters.** If more headroom is
+needed, the cheapest win is the 512 model (20.0 ms inference, and a 480->512
+resize is smaller) rather than optimizing the resize itself.
+
+## Why centre-crop
+
+The camera gives 640x480; the model wants a square. The program takes the
+central 480x480 (dropping 80 px each side) and scales that to SxS. Cropping
+rather than stretching keeps the aspect ratio correct — a monocular depth net
+infers scale partly from object proportions, so a stretched frame biases the
+depth. The cost is ~25% horizontal field of view.
+
+## Display notes
+
+Weston's socket for root is at `/run/user/root/wayland-1`, **not** the
+documented `/run/user/0` — with the latter `waylandsink` never reaches PAUSED.
+The program sets `XDG_RUNTIME_DIR=/run/user/root` and
+`WAYLAND_DISPLAY=wayland-1` in the `popen()` command line itself.
+
+Display was verified, not assumed. `DEPTH_CAM_DUMP=<path>` writes the last
+colourized BGRA frame (plus the raw fp16 depth and the cropped RGB) so the
+displayed content can be checked off-board. On a 60-frame run the dump showed a
+correct, well-aligned depth map: the person and the phone they were holding
+rendered near (warm), the desk and back wall rendered far (cool), with 2562
+distinct depth values and a monotonic near-to-far gradient from the bottom of
+the frame to the top. The pipeline runs clean (`gbm_create_device ... msm_drm`,
+exit 0), but see the caveat below about on-screen confirmation.
+
+## Verified
+
+- Compiles clean with `-Wall -Wextra`.
+- 300 frames headless, exit 0, 22.2 FPS steady.
+- 300 frames with display, exit 0, 20.3 FPS steady, clean GBM allocation.
+- Depth output confirmed correct against the corresponding camera frame.
+
+## Caveat
+
+Frames were confirmed to reach the sink and to contain a correct depth map, and
+`waylandsink` allocated GBM buffers without error — but this was driven over
+SSH with no eyes on the physical HDMI output, so **on-screen appearance was not
+visually confirmed**. If the monitor turns out to be blank, the pipeline and
+the frame content are not the suspects; check Weston's output/display state.
