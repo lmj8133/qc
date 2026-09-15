@@ -16,7 +16,22 @@ resident — spawning `qnn-net-run` per frame costs ~594 ms of wall clock each.
 Everything the per-frame loop touches is allocated before the loop starts. The
 loop performs zero `malloc`/`free`.
 
-## Build
+## Quick start
+
+```bash
+./run.sh                 # 512px with display -- the recommended mode (29.5 FPS)
+./run.sh 512 bench       # headless benchmark, 300 frames (30.1 FPS)
+./run.sh 512 live        # run until Ctrl-C
+./run.sh 640 bench       # a different model size
+```
+
+`run.sh` builds on the board, stages the context binary, and runs with the
+right environment. `/dev/shm` is a tmpfs, so it re-stages every time rather
+than assuming anything survived a reboot.
+
+Override the board address with `BOARD=<ip> ./run.sh`.
+
+## Build (manual)
 
 ```bash
 ./build.sh [board-ip]        # default 192.168.3.80
