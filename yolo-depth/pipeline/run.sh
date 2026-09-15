@@ -5,15 +5,19 @@
 # script re-stages each time rather than assuming previous state survives.
 #
 # Usage:
-#   ./run.sh                 # 512px with display (30 FPS, the recommended mode)
+#   ./run.sh                 # 512px with display (side by side)
+#   ./run.sh 384 live        # 384px, runs until Ctrl-C -- best for demos (30 FPS)
 #   ./run.sh 512 bench       # 512px headless benchmark, 300 frames
-#   ./run.sh 640 bench       # 640px headless benchmark
-#   ./run.sh 512 live        # run until Ctrl-C
+#   ./run.sh 512 live --depth-only    # extra flags pass through to depth_cam
 # Exit code 0 on success, non-zero on failure.
 set -euo pipefail
 
 SIZE="${1:-512}"
 MODE="${2:-display}"
+shift $(( $# > 2 ? 2 : $# ))
+# Anything after the mode is passed through to depth_cam verbatim, e.g.
+#   ./run.sh 512 live --depth-only
+EXTRA="$*"   # plain string: safe under `set -u` when empty
 BOARD="${BOARD:-192.168.3.80}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="y26n_${SIZE}_fp16_v73.bin"
@@ -61,5 +65,5 @@ $SSH_TTY "bash -lc '
 	source /opt/qcom/qirp-sdk/qirp-setup.sh >/dev/null 2>&1
 	export LD_LIBRARY_PATH=/opt/qcom/qirp-sdk/lib/aarch64-oe-linux-gcc11.2:\$LD_LIBRARY_PATH
 	export XDG_RUNTIME_DIR=/run/user/root WAYLAND_DISPLAY=wayland-1
-	cd /dev/shm && exec ./depth_cam --model $BIN $ARGS
+	cd /dev/shm && exec ./depth_cam --model $BIN $ARGS $EXTRA
 '"

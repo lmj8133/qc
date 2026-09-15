@@ -783,7 +783,9 @@ int main(int argc, char **argv)
 	if (!no_display) {
 		disp = display_open(depth_only ? S : 2 * S, S, 30);
 		if (disp) {
-			printf("display          : gst-launch-1.0 fdsrc -> waylandsink (%dx%d BGRA)\n", S, S);
+			printf("display          : waylandsink %dx%d BGRA (%s)\n",
+			       depth_only ? S : 2 * S, S,
+			       depth_only ? "depth only" : "camera | depth");
 		} else {
 			fprintf(stderr, "WARN: continuing without display\n");
 		}

@@ -19,10 +19,18 @@ loop performs zero `malloc`/`free`.
 ## Quick start
 
 ```bash
-./run.sh                 # 512px with display -- the recommended mode (29.5 FPS)
-./run.sh 512 bench       # headless benchmark, 300 frames (30.1 FPS)
-./run.sh 512 live        # run until Ctrl-C
-./run.sh 640 bench       # a different model size
+./run.sh 384 live                 # best for demos: side by side, full 30 FPS
+./run.sh                          # 512px, side by side, 300 frames
+./run.sh 512 bench                # headless benchmark
+./run.sh 512 live --depth-only    # depth only, no camera pane
+```
+
+Usage is `./run.sh [size] [mode] [extra flags...]`, where mode is
+`display` (default), `bench` or `live`. **Anything after the mode is passed
+straight through to `depth_cam`**, so any flag from the table below works:
+
+```bash
+./run.sh 384 live --depth-only --stats-every 60
 ```
 
 `run.sh` builds on the board, stages the context binary, and runs with the
