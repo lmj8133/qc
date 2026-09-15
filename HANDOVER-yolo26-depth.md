@@ -14,14 +14,15 @@
 
 ## 1. 結論
 
-**✅ 可行，且已完整驗證。YOLO26n-depth 已在板上 Hexagon V73 NPU 跑出正確深度圖。**
+**✅ 可行，且已完整驗證。YOLO26n-depth 已在板上 Hexagon V73 NPU 即時執行 —— 512px 30 FPS，深度影像即時顯示於 HDMI。**
 
 | 項目 | 實測結果 |
 |---|---|
 | 模型轉換 | ✅ 成功，329 個 op **全部**進 NPU，零 CPU fallback |
 | 板上推論 | ✅ 正確，與 ONNX 參考值相關係數 **0.9997** |
-| 延遲 | **~40 ms/frame（~25 FPS）**，20 次平均、Hexagon V73 |
+| 推論延遲 | 768px 39.6 ms／640px 28.6 ms／**512px 19.4 ms**（純 NPU，見 §6 拆解） |
 | 產出 | `yolo-depth/build_qnn.sh` 一鍵重現；`artifacts/*.bin` 可直接上板 |
+| **即時推論** | ✅ **512px 達 30 FPS**，相機→NPU→HDMI 全鏈路已跑通並目視確認 |
 
 精度對照（NYU 室內實拍，768×768）：
 
@@ -443,11 +444,33 @@ NPU 本來就跑滿，不存在 DVFS 節流，此路不通。
 > 上表 MAE 衡量的是 **FP16 轉換誤差**（板上 vs 同尺寸 ONNX），
 > **不是深度估計的絕對精度** —— 低解析度模型對細節的還原本就較差，那需跑 NYU val 654 張才能評估。
 
+### ✅ 階段四：端到端 pipeline 已完成
+
+`yolo-depth/pipeline/depth_cam.c` —— 單一 C 程式，graph 常駐：
+
+```
+V4L2 YUYV 擷取 → YUY2→RGB → 置中裁切+縮放 → fp16 NCHW
+  → QNN graphExecute（NPU）→ turbo 上色 → waylandsink
+```
+
+執行：`cd yolo-depth/pipeline && ./run.sh`（512px + 顯示）
+
+| size | 無畫面 | 有畫面 | 瓶頸 |
+|---|---|---|---|
+| **512** ⬅ 建議 | **30.1 FPS** | **29.5 FPS** | **相機**（已跑滿 30fps 上限） |
+| 640 | 22.4 FPS | 20.3 FPS | 算力 |
+
+**HDMI 螢幕實際顯示已確認**（2026-09-15，使用者目視）。
+
+初版擔心的「板上沒有 onnxruntime / 沒有 pip / Python 僅 3.10」並未造成阻礙 ——
+**根本不需要 onnxruntime**，直接用板上的 QNN C API（headers 在 `/opt/qcom/qirp-sdk/include/`）
+搭配板上自帶的 gcc 原生編譯即可。
+
 ### 尚未驗證
 
 - **精度僅比對 2 張圖** —— 未跑 NYU val 654 張完整 Delta1/RMSE，無法對照官方 0.882 / 0.414m
-- **端到端 pipeline 未做**（原階段四）—— 板上**沒有 onnxruntime**、沒有 pip、Python 僅 3.10
-  （`onnxruntime-qnn` wheel 從 cp311 起跳），因此要走 `qnn-net-run` 或 QNN C API 接 GStreamer
+- **640px 未達 30 FPS** —— 各階段嚴格序列相加，需將前處理與推論重疊（double-buffer + 執行緒）
+  或把 resize 移到 GPU。若 512 可接受則不需要
 
 ---
 

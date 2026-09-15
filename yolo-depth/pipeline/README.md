@@ -184,14 +184,13 @@ exit 0), but see the caveat below about on-screen confirmation.
 ## Verified
 
 - Compiles clean with `-Wall -Wextra`.
-- 300 frames headless, exit 0, 22.2 FPS steady.
-- 300 frames with display, exit 0, 20.3 FPS steady, clean GBM allocation.
-- Depth output confirmed correct against the corresponding camera frame.
-
-## Caveat
-
-Frames were confirmed to reach the sink and to contain a correct depth map, and
-`waylandsink` allocated GBM buffers without error — but this was driven over
-SSH with no eyes on the physical HDMI output, so **on-screen appearance was not
-visually confirmed**. If the monitor turns out to be blank, the pipeline and
-the frame content are not the suspects; check Weston's output/display state.
+- 512px: 30.1 FPS headless / 29.5 FPS with display, exit 0, steady.
+- 640px: 22.4 FPS headless / 20.3 FPS with display, exit 0, steady.
+- 1200-frame run: FPS flat across 200-frame blocks, `VmRSS` constant at
+  24992 kB, no thermal drift (inference +0.036 ms first-200 vs last-200).
+- Depth output matches the ONNX reference at **corr 0.999946 / MAE 0.0145 m**,
+  measured on the exact fp16 tensor handed to `graphExecute`.
+- Output is input-dependent: changing the scene changes the depth map
+  (no two frames identical; mean |diff| 0.413 m across an exposure change).
+- **On-screen output confirmed on the HDMI monitor** (2026-09-15): the
+  colourized depth map renders live via `waylandsink`.
