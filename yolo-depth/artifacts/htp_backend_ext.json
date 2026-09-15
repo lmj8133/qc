@@ -1,0 +1,6 @@
+{
+  "backend_extensions": {
+    "shared_library_path": "libQnnHtpNetRunExtensions.so",
+    "config_file_path": "artifacts/htp_cfg_v73.json"
+  }
+}

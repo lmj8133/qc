@@ -1,0 +1,9 @@
+# Staged QAIRT 2.32.0 toolchain (copied from board /opt/qcom/qirp-sdk, ~858MB)
+qairt-2.32/
+# Build artifacts (regenerate with build_qnn.sh)
+artifacts/*.onnx
+artifacts/*.dlc
+artifacts/*.bin
+weights/*.pt
+weights/*.onnx
+artifacts/ctxinfo.json

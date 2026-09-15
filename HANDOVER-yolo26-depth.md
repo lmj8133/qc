@@ -2,20 +2,39 @@
 
 | | |
 |---|---|
-| 日期 | 2026-09-15 |
+| 日期 | 2026-09-15（§1、§4、§5 於同日實測後改寫） |
 | 目標 | 在 QCS8550 (aida3_RDK_SOCKET) 上執行 Ultralytics YOLO26-depth |
 | 執行環境 | 模型轉換在 **x86 server**；推論在板子 |
 | 前置狀態 | 板子已完成 bring-up，見 `VERIFICATION-2026-09-14.md` |
 
+> **閱讀說明**：本文件初版為「可行性推測」，後續整條路徑已實測打通。
+> 標記 ✅ 者為實測結論；標記 ⛔ 者為初版的推測，實測後證實**錯誤**，保留是為了讓後續接手者不要重走。
+
 ---
 
-## 1. 目標與結論預告
+## 1. 結論
 
-**結論：技術上可行，但尚未經證實，有三個未知數需實測。**
+**✅ 可行，且已完整驗證。YOLO26n-depth 已在板上 Hexagon V73 NPU 跑出正確深度圖。**
 
-**板上已有完整的 QNN runtime（QNN SDK v2.32.0），且 Hexagon V73 NPU 經實測確認可用**，因此 **QNN 應為優先路徑**，而非 TFLite。詳見 §2、§4。
+| 項目 | 實測結果 |
+|---|---|
+| 模型轉換 | ✅ 成功，329 個 op **全部**進 NPU，零 CPU fallback |
+| 板上推論 | ✅ 正確，與 ONNX 參考值相關係數 **0.9997** |
+| 延遲 | **~40 ms/frame（~25 FPS）**，20 次平均、Hexagon V73 |
+| 產出 | `yolo-depth/build_qnn.sh` 一鍵重現；`artifacts/*.bin` 可直接上板 |
 
-不要直接搬 YOLO26-depth 上板。先驗證 runtime 基礎（§5 階段一），再處理模型轉換。
+精度對照（NYU 室內實拍，768×768）：
+
+```
+板上 NPU (FP16) : min=2.4121 max=3.8867 mean=3.1068 std=0.3474
+ONNX 參考值      : min=2.4426 max=3.8946 mean=3.1188 std=0.3460
+```
+
+### ⛔ 初版結論已作廢的部分
+
+初版寫「有三個未知數需實測」、「不要直接搬上板，先驗證 runtime 基礎（階段一）」。
+三個未知數現已全部有答案（見 §6），且 **QNN 路徑整條打通後，階段一的 TFLite 前置驗證已無必要** ——
+它原本的用途是「先排除 runtime 問題」，但 QNN 路徑已自證可用。TFLite 路徑目前無人驗證，也不再是建議方向。
 
 ---
 
@@ -101,14 +120,25 @@ Core Version      : Hexagon Architecture V73
 >
 > `--backend` 只接受 `gpu` / `dsp` / `all`；**HTP 歸類在 `dsp` 之下**，傳 `htp` 會被拒絕。
 
-### ⚠️ 重要：context binary 可在板上編譯
+### ⛔ 已作廢：「context binary 在板上編譯」
 
-`qnn-context-binary-generator` **存在於板子上**，因此建議：
+初版建議「server 端產出未編譯的 QNN model，再到板上編譯成 context binary」。
+**方向對（在目標機器編譯，版本必然正確），但前提不成立，實測行不通：**
 
-1. server 端只產出**未編譯的 QNN model**（`.so` 或 `.cpp`+`.bin`）
-2. 在板子上編譯成 HTP context binary
+`qnn-context-binary-generator --model` 要吃的是 `qnn_model_name.so`，
+而**板上的 aarch64 工具集沒有任何 converter 能從 ONNX 產出那個 `.so`** ——
+`qairt-converter` / `qnn-onnx-converter` 在 aarch64 的 bin 目錄裡並不存在。
 
-**此法避開「server 端須指定正確 SoC ID 與 Hexagon 版本」的風險** —— 在目標機器上編譯，版本必然正確。
+板上 aarch64 可用的工具只有這些：
+
+```
+genie-t2e-run  genie-t2t-run  qnn-context-binary-generator  qnn-net-run
+qnn-platform-validator  qnn-profile-viewer  qnn-throughput-net-run  qtld-net-run
+snpe-diagview  snpe-net-run  snpe-parallel-run  snpe-platform-validator  snpe-throughput-net-run
+```
+
+**✅ 實際可行的做法正好相反**：把板子自帶的 **x86_64 轉換工具鏈搬到 server**，全程在 server 編譯。
+版本一樣必然正確（都是 2.32.0），而且 server 算力遠高於板子。詳見 §4。
 
 ### 典型推論指令
 
@@ -126,9 +156,35 @@ qnn-net-run \
 
 backend 退階順序用於定位問題層級：`libQnnHtp.so`（NPU）→ `libQnnGpu.so` → `libQnnCpu.so`。
 
-### ⚠️ 版本相容性
+### ⛔ 版本相容性 —— 不是「可能」，是**必定失敗**（已實測）
 
-板上 QNN SDK 為 **v2.32.0**。**server 端的 QAIRT 轉換工具版本應與之相符** —— 版本落差過大可能產生板子無法載入的模型格式。這是開始轉換前要確認的第一件事。
+初版寫「版本落差過大**可能**產生板子無法載入的模型格式」。實測結果比這更硬：
+
+**QNN context binary 只向下相容。舊 runtime 永遠無法載入新 SDK 編出的 binary。**
+
+板上 runtime 為 `v2.32.0.250228225014`。餵給它一顆 2.50.40 編的 binary，錯誤訊息非常明確：
+
+```
+<E> Using newer context binary on old SDK
+<E> Fail to get context blob with err 5000
+<E> Failed to create context from binary with err 0x1388   # QNN_CONTEXT_ERROR_BINARY_VERSION
+```
+
+板上 `libQnnHtp.so` 內含明確的版本閘門字串，證實這是設計行為而非個案：
+
+```
+<E> Can't read future blob. Newest blob version supported: %d.%d.%d. Current blob version: %d.%d.%d.
+```
+
+**這直接判了 `onnxruntime-qnn` 路徑死刑**（含 Ultralytics 的 `format="qnn"`，見 §4/§5）：
+
+| onnxruntime-qnn | 內建 QAIRT | x86_64 wheel |
+|---|---|---|
+| 2.1.1 / 2.2.0 | 2.45 / 2.46 | ❌ 僅 aarch64/Windows |
+| 2.3.0 | **2.47.0** | ✅（最舊可用者） |
+| 2.4.0 / 2.5.0 / 2.6.0 | 2.48.40 / 2.49.40 / 2.50.40 | ✅ |
+
+**降版本無解** —— 最舊的 x86_64 wheel 也是 2.47，仍遠新於板上 2.32.0。實測 2.3.0 編的 binary 在板上得到位元完全相同的拒絕訊息。
 
 ### 其他已確認項目
 
@@ -165,130 +221,201 @@ backend 退階順序用於定位問題層級：`libQnnHtp.so`（NPU）→ `libQn
 
 ---
 
-## 4. 兩條可能路徑
+## 4. 轉換路徑（已定案）
 
-Ultralytics 匯出格式中，與本平台相關的有兩條：
+**✅ 採用 QNN，並且用「板子自帶的 x86_64 工具鏈」在 server 上轉換。**
 
-| 路徑 | 板上 runtime | 評估 |
-|---|---|---|
-| **Qualcomm QNN** ⬅ 優先 | `/opt/qcom/qirp-sdk`（**已在板上**，含 HTP/GPU/DSP/CPU backend） | 專為 Qualcomm 硬體設計。**HTP backend 可利用 NPU**，效能遠高於 TFLite GPU delegate |
-| **LiteRT** (`.tflite`) | `libtensorflowlite_c.so` **2.11.1** | 工具鏈較單純，但 runtime 版本偏舊；depth task 支援未明載 |
+### ⛔ 已作廢：「server 端須另行取得 QAIRT SDK」
 
-**建議 QNN 優先。** 板上 runtime 已就緒，server 端仍需安裝 Qualcomm AI Engine Direct SDK（QAIRT）做模型轉換 —— 該 SDK 獨立於本專案的 application SDK，須另行取得。
+初版寫「server 端仍需安裝 Qualcomm AI Engine Direct SDK（QAIRT）…須另行取得」。
+**不需要，也不該去申請** —— 申請到的多半是新版，反而會撞上 §2 的版本閘門。
 
-TFLite 路徑若要用上 NPU，需透過 `--external_delegate_path=<QNN TFLite delegate>` 掛載 QNN delegate（`benchmark_model` 無內建的 `use_hexagon`/`use_nnapi` 旗標）。
+**板子自己就帶著一整套 x86_64 轉換工具**，位於 `/opt/qcom/qirp-sdk/`：
 
-### ⚠️ 已知風險
+```
+bin/x86_64-linux-clang/     44 個工具，47 MB
+  qairt-converter  qairt-quantizer  qairt-dlc-info  qnn-onnx-converter
+  qnn-model-lib-generator  qnn-context-binary-generator  qnn-net-run  snpe-onnx-to-dlc ...
+lib/x86_64-linux-clang/    187 MB
+lib/python/qti/            363 MB（含 linux-x86_64 原生 .so）
+```
 
-Ultralytics 的 TFLite/LiteRT 匯出文件**只明確提到 detection 與 classification**，未載明 depth task 的支援狀況。depth 是較新的 task，轉換時可能遇到不支援的 op（深度估計的 decoder 常含 upsample/interpolate 這類在量化或 delegate 上表現不佳的運算）。
+這些在 aarch64 板子上是**休眠**的（直接執行得到 `Exec format error`），
+但搬到 x86 server 上就能跑，而且版本天生是 `2.32.0.250228225014` —— 與板上 runtime 完全一致。
 
-**這需要實測，不能從文件推斷。**
+工具鏈已 staged 於 `yolo-depth/qairt-2.32/`（858 MB，已 gitignore）。
+
+### 在 Ubuntu 24.04 跑 2.32.0 工具鏈需要的四件事
+
+SDK 是 2023 年為 Ubuntu 22.04 打包的，在 24.04 上需要補（全部 user-level，**不需 root**）：
+
+1. **CPython 3.10**（uv 安裝）—— 原生模組 `libPyIrGraph.so` 連結 `libpython3.10.so.1.0`，host 的 3.12 跑不動
+2. **LLVM-18 的 `libc++.so.1` / `libc++abi.so.1` / `libunwind.so.1`** —— Ubuntu 只提供 `libunwind.so.8`，用 `dpkg-deb -x` 解出即可，不必安裝
+3. `LD_LIBRARY_PATH` 需含 SDK 自己的 `libs/x86_64-linux-clang`
+4. 一個帶 numpy/onnx/protobuf 的 venv —— 否則 CLI 進入點會在 `import numpy` 失敗
+
+> `qairt-converter` / `qairt-quantizer` 是 **Python 腳本**（需用 venv 的直譯器跑）；
+> `qnn-context-binary-generator` / `qnn-net-run` 是原生 ELF（直接執行）。
+
+以上都已封裝進 `yolo-depth/build_qnn.sh`。
+
+### 兩條路徑的現況
+
+| 路徑 | 狀態 |
+|---|---|
+| **QNN + 板載 x86 工具鏈** ⬅ 採用 | ✅ 已驗證，40 ms/frame，精度 corr 0.9997 |
+| **QNN + `onnxruntime-qnn`**（Ultralytics `format="qnn"`） | ⛔ **死路** —— 轉換會成功，但板子必定拒收（§2） |
+| **LiteRT** (`.tflite`) | 未驗證。板上 runtime 2.11.1（2022）偏舊，且 depth task 支援未明載 |
+
+### ⚠️ 關於 FP16 vs 量化
+
+採用 **FP16**：不需校準資料，精度更貼近參考值。
+
+- HTP **沒有 FP32 執行路徑**，因此 FP32 DLC 無法 finalize（錯誤 `q::flat_from_vtcm`）。必須 FP16 或量化。
+- W8A16 也實測可行（`qairt-quantizer --act_bitwidth 16 --weights_bitwidth 8` + 8 張校準圖），MAE 0.049 m、corr 0.9911，binary 較小；但需要校準資料，且對校準集外的輸入會被 clamp 在校準範圍上緣。
+
+### ✅ 初版的「不支援 op」風險未發生
+
+初版預期「depth 的 decoder 常含 upsample/interpolate 這類在量化或 delegate 上表現不佳的運算」，
+可能遇到不支援的 op。**實測未發生** —— 329 個 op 全數轉換成功並進入 NPU。
+
+圖中確實含 5 個 `Resize`、1 個 `ConvTranspose`、`Softmax` 與 log-depth head 的 `Exp`/`Log`，
+但 QNN 全部支援。唯一與 `Resize` 有關的錯誤訊息出現在 FP32 finalize 失敗時
+（`q::flat_from_vtcm`），且該錯誤歸咎的節點會隨 `vtcm_mb` 改變 —— 那是 VTCM 溢出的通用症狀，
+**不是 Resize 本身不被支援**，改用 FP16 即解決。
 
 ---
 
-## 5. 建議執行順序
+## 5. 實際執行流程（已驗證）
 
-### 階段一：驗證 TFLite runtime 基礎 ⬅ 先做這個
-
-**不要跳過。** 用已知能動的小模型排除 runtime 本身的問題，否則之後 YOLO 失敗時無法分辨是模型問題還是環境問題。
+### 一鍵重現
 
 ```bash
-# server 端：取得一個標準 TFLite 模型
-# 例如 MobileNet v1/v2 quant，或任何已知可用的 .tflite
-
-scp mobilenet_v1_1.0_224_quant.tflite root@192.168.3.80:/data/
+cd yolo-depth
+./build_qnn.sh                    # 預設 768px / weights/yolo26n-depth.pt
+./build_qnn.sh 640                # 換 imgsz
 ```
 
-板子端：
+三階段：**PyTorch → ONNX(NCHW, opset 17) → FP16 DLC → V73 context binary**，
+最後自動驗證 `dsp arch == 73`，不符就 `exit 2`。
 
-```bash
-# 1. runtime 能否載入並推論
-benchmark_model --graph=/data/mobilenet_v1_1.0_224_quant.tflite --num_runs=50
-
-# 2. delegate 是否真的生效 —— 比對延遲差異
-benchmark_model --graph=/data/mobilenet_v1_1.0_224_quant.tflite --num_runs=50 --use_gpu=false
-benchmark_model --graph=/data/mobilenet_v1_1.0_224_quant.tflite --num_runs=50 --use_gpu=true
-benchmark_model --graph=/data/mobilenet_v1_1.0_224_quant.tflite --num_runs=50 --use_xnnpack=true
-```
-
-**判讀**：若 `--use_gpu=true` 與 `false` 的延遲差異不明顯，表示 **delegate 沒有真正掛上**，而非模型太小。這是必須先解決的問題 —— 記得看輸出中 delegate 實際接管了幾個 node。
-
-`label_image` 額外需要一張 **BMP** 格式測試圖（`-i` 參數註明 `image_name.bmp`）。
-
-### 階段二：YOLO26n-depth 匯出（先用最小變體）
-
-server 端環境：
+### server 端環境
 
 ```bash
 uv init yolo-depth && cd yolo-depth
-uv add ultralytics
+uv add ultralytics onnx onnxslim        # ultralytics 8.4.152 / torch 2.14.0+cu130
 ```
 
-TFLite 路徑：
+權重在 assets 的 **v8.4.0** tag（不是 v8.3.0，該 tag 下沒有 depth 權重）：
+
+```bash
+curl -sSL -o weights/yolo26n-depth.pt \
+  https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n-depth.pt
+```
+
+### ⛔ 已作廢：階段一（TFLite runtime 前置驗證）
+
+初版要求「先用 MobileNet 之類的小模型驗證 TFLite runtime，不要跳過」。
+該步驟的目的是「先排除 runtime 本身的問題」，但 **QNN 路徑已整條自證可用**，此前置驗證已無必要。
+只有在未來要改走 TFLite 路徑時才需要回頭做。
+
+### ⛔ 已作廢：`model.export(format="qnn")`
+
+初版階段二建議：
 
 ```python
-from ultralytics import YOLO
-
-model = YOLO("yolo26n-depth.pt")
-model.export(format="litert", imgsz=768)          # FP32 先試
-# model.export(format="litert", imgsz=768, quantize=8, data="<dataset.yaml>")  # INT8 需校準資料
+model.export(format="qnn")    # ⛔ 不要用
 ```
 
-> 注意：`format="tflite"` 已棄用，改用 `format="litert"`，產出同樣是 `.tflite`。
+**這行會成功執行**（7 秒，產出 `yolo26n-depth_qnn.onnx`，329 op 全進 NPU、零 fallback），
+**但產出的 binary 板子必定拒收** —— 它用 `onnxruntime-qnn` 內建的 QAIRT 2.50.40 編譯（見 §2）。
 
-QNN 路徑（**建議優先**）：
+保留 `yolo-depth/export_qnn.py` 供參考，但它的產出**不能上板**。
 
-```python
-model.export(format="qnn")    # 需先在 server 安裝 Qualcomm AI Engine Direct SDK (QAIRT)
+另外兩點與初版描述不同：
+- QNN 匯出**強制量化**為 `w8a16`（`qnn` 列在 `FP32_UNSUPPORTED_FORMATS`），不存在「FP32 先試」
+- 匯出的輸入是 **channel-last `[1,768,768,3]`**（`QNNModel` 包裝所致）
+
+### ⚠️⚠️ 最陰險的坑：`--config_file` 需要 `backend_extensions` 外層包裝
+
+**這個坑不會有任何錯誤訊息。**
+
+`qnn-context-binary-generator --config_file` 期待的是 backend-extensions 外層結構。
+直接餵裸的 HTP config（`graphs`/`devices`/`context`）會被**靜默忽略、exit 0、無警告**，
+編出 **dsp arch 68 / O0 / vtcm 4** 的 binary。
+
+該 binary 在 V73 板上**載入成功、執行成功、零錯誤**，但**每個像素輸出同一個值**
+（log-depth 模型：全圖 4.441，std=0），且對任何輸入都一樣。
+
+正確寫法要兩層：
+
+```jsonc
+// htp_backend_ext.json —— 傳給 --config_file 的是這個
+{"backend_extensions": {"shared_library_path": "libQnnHtpNetRunExtensions.so",
+                        "config_file_path": "artifacts/htp_cfg_v73.json"}}
+
+// htp_cfg_v73.json —— 真正的 HTP 設定
+{"graphs":  [{"graph_names": ["<DLC graph 名稱>"], "vtcm_mb": 8, "O": 3, "fp16_relaxed_precision": 1}],
+ "devices": [{"dsp_arch": "v73", "soc_model": 43, "pd_session": "unsigned"}],
+ "context": {"weight_sharing_enabled": false}}
 ```
 
-匯出後推到板子，執行前先設定環境：
+**哪個欄位決定正確性**（A/B 實測）：
+
+| 設定 | 結果 |
+|---|---|
+| 裸 config（無 wrapper） | arch **68** → 輸出常數 ⛔ |
+| wrapper + **故意寫錯** `graph_names` | arch **73**，但 O0/vtcm4 → 輸出**正確** ✅ |
+
+→ **`dsp arch`（device 層）決定正確性**；`graph_names` 與 O/vtcm 只影響**效能**。
+`graph_names` 必須等於 DLC 的 graph 名稱（即 `qairt-converter --output_path` 的 basename）才能拿到 O3/vtcm8。
+
+> 註：曾有「舊 binary 是殘檔」的說法，已由 A/B 測試否證 ——
+> 用裸 config 重新編譯出的新檔與當初那顆壞檔 **MD5 完全相同**，是可重現的行為，不是殘檔。
+
+**出貨前務必檢查**（`build_qnn.sh` 已內建）：
 
 ```bash
-. /opt/qcom/qirp-sdk/qirp-setup.sh    # PATH / LD_LIBRARY_PATH / ADSP_LIBRARY_PATH
+qnn-context-binary-utility --context_binary X.bin --json_file i.json
+grep -E '"dsp arch"|"optimizationLevel"|"vtcmSize"|"soc model"' i.json
+# 必須是 arch 73 / O 3 / vtcm 8 / soc 43
 ```
 
-backend 選擇 `libQnnHtp.so`（NPU）。若 HTP 無法載入模型，依序退回 `libQnnGpu.so`、`libQnnCpu.so` 以定位問題層級。
-
-**匯出失敗時**，錯誤訊息通常會指出哪個 op 不支援 —— 記錄下來，那是判斷可行性的關鍵資訊，不要只回報「轉換失敗」。
-
-### 階段三：板上實測
+### 板上執行
 
 ```bash
-scp yolo26n-depth.tflite root@192.168.3.80:/data/
-
-ssh root@192.168.3.80 '
-  benchmark_model --graph=/data/yolo26n-depth.tflite --num_runs=20 --use_gpu=false
-  benchmark_model --graph=/data/yolo26n-depth.tflite --num_runs=20 --use_gpu=true
-'
+. /opt/qcom/qirp-sdk/qirp-setup.sh
+echo /data/input.raw > /data/l.txt
+qnn-net-run --backend libQnnHtp.so \
+  --retrieve_context /data/y26n_768_fp16_v73.bin \
+  --input_list /data/l.txt --output_dir /data/out
+# 輸出：/data/out/Result_0/output0.raw，589824 個 float32（768×768），單位公尺
 ```
 
-QNN 路徑的量測需先 source `qirp-setup.sh`，並分別以 HTP / GPU / CPU backend 執行以比較。
+**輸入格式**：NCHW `[1,3,768,768]` float32、範圍 [0,1]、**RGB**（cv2 讀進來是 BGR，須轉換）。
+DLC 邊界保持 NCHW，內部自行插 Transpose 轉 NHWC，所以餵 NCHW 是對的。
 
-量測項目：
-- 單張推論延遲（CPU vs GPU vs HTP/NPU）
-- delegate 接管的 node 比例 —— **YOLO 類模型常有部分 op fallback 回 CPU，實際加速比可能遠低於預期**
-- 記憶體佔用
-
-### 階段四：端到端 pipeline（選用）
-
-板上有 USB camera（AVerMedia PW310P，`/dev/video2`）可作輸入源，已驗證可用：
-
-```bash
-gst-launch-1.0 v4l2src device=/dev/video2 ! image/jpeg,width=1280,height=720 ! jpegdec ! ...
-```
-
-板載 MIPI camera **無模組，不可用**。
+> `qnn-net-run` 預設以浮點解析輸入檔並自行轉換，因此餵 float32 即可，
+> 不需要配合 graph 的 Float_16 而預先轉半精度（除非加 `--use_native_input_files`）。
 
 ---
 
-## 6. 三個未知數（需實測回答）
+## 6. 三個未知數 —— 已全部回答
 
-| # | 問題 | 如何判定 |
+| # | 問題 | ✅ 實測答案 |
 |---|---|---|
-| 1 | YOLO26-depth 能否成功匯出為 QNN / TFLite？ | 階段二。失敗時記錄具體不支援的 op |
-| 2 | HTP（NPU）能接管多少比例的 op？ | 階段三。QNN 的 graph prepare 階段會報告 fallback 情形 |
-| 3 | 實際延遲是否符合應用需求？ | 階段三實測，**不可用 T4 的 2.7ms 推估** |
+| 1 | 能否匯出 QNN / TFLite？ | **能**。QNN 轉換成功，無不支援的 op。（TFLite 未測） |
+| 2 | HTP（NPU）能接管多少 op？ | **100%** —— 329 個 op 融成單一 partition，零 CPU fallback |
+| 3 | 實際延遲？ | **~40 ms/frame（~25 FPS）**，20 次平均、accelerator 時間 39.6 ms |
+
+初版警告「不可用 T4 的 2.7ms 推估」是對的：實測 40 ms，約為 T4+TensorRT 的 **15 倍**。
+
+### 尚未驗證
+
+- **延遲未拆解** —— 40 ms 含檔案 I/O 與 fastRPC 來回，純 NPU compute 應更低
+- **精度僅比對 2 張圖** —— 未跑 NYU val 654 張完整 Delta1/RMSE，無法對照官方 0.882 / 0.414m
+- **端到端 pipeline 未做**（原階段四）—— 板上**沒有 onnxruntime**、沒有 pip、Python 僅 3.10
+  （`onnxruntime-qnn` wheel 從 cp311 起跳），因此要走 `qnn-net-run` 或 QNN C API 接 GStreamer
 
 ---
 
@@ -330,4 +457,5 @@ ssh root@<新 IP> 'ip -br addr show eth0'    # 或從 UART 查
 - Ultralytics 深度估計：https://docs.ultralytics.com/tasks/depth
 - Ultralytics LiteRT 匯出：https://docs.ultralytics.com/integrations/tflite/
 - 板子完整驗證記錄：`VERIFICATION-2026-09-14.md`（同目錄，796 行）
+- 轉換腳本與產出：`yolo-depth/`（`build_qnn.sh`、`artifacts/`、`qairt-2.32/`）
 - 原廠文件：`Release_README_V00.00.03.pdf`、`qcs8550-flash-sop.html`
