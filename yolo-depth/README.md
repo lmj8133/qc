@@ -41,10 +41,49 @@ scp -r root@<board>:/opt/qcom/qirp-sdk/lib/x86_64-linux-clang qairt-2.32/libs/
 scp -r root@<board>:/opt/qcom/qirp-sdk/lib/python/qti         qairt-2.32/
 ```
 
-On Ubuntu 24.04 it also needs, all user-level: CPython **3.10** (the native modules link
-`libpython3.10.so.1.0`), LLVM-18 `libc++`/`libc++abi`/`libunwind` under `qairt-2.32/cxx`
-(Ubuntu ships only `libunwind.so.8`), and a venv at `qairt-2.32/venv310` with
-numpy/onnx/protobuf.
+On Ubuntu 24.04 it also needs three user-level pieces — **no root, nothing installed
+system-wide**. These were previously described but not spelled out; the exact steps are:
+
+```bash
+cd qairt-2.32
+
+# 1. CPython 3.10 -- the native converter modules link libpython3.10.so.1.0,
+#    so the host's 3.12 cannot load them.
+uv python install 3.10
+
+# 2. LLVM-18 C++ runtime. Ubuntu 24.04 ships libunwind.so.8, but the SDK wants
+#    libunwind.so.1, so extract rather than install.
+mkdir -p /tmp/llvm18 cxx
+for pkg in libc++1-18 libc++abi1-18 libunwind-18; do
+    ( cd /tmp/llvm18 && apt-get download "$pkg" && dpkg-deb -x "$pkg"*.deb . )
+done
+cp -a /tmp/llvm18/usr cxx/
+
+# 3. A Python 3.10 venv for the converter CLIs (they fail at `import numpy` otherwise).
+uv venv --python 3.10 venv310
+VIRTUAL_ENV=venv310 uv pip install \
+    numpy==1.26.4 onnx==1.17.0 onnxruntime==1.23.2 onnxsim protobuf PyYAML sympy
+```
+
+Verify the result — this must print the board's own SDK version,
+`QNN SDK v2.32.0.250228225014_116386`:
+
+```bash
+# note cpython-3.10.* -- the bare cpython-3.10 name is a symlink that env cannot traverse
+PY310LIB=$(ls -d ~/.local/share/uv/python/cpython-3.10.*/lib | head -1)
+LD_LIBRARY_PATH=$PWD/libs/x86_64-linux-clang:$PWD/cxx/usr/lib/llvm-18/lib:$PY310LIB \
+    ./x86_64-linux-clang/qnn-context-binary-generator --version
+```
+
+If that prints a version, the native half works. For the Python converter half:
+
+```bash
+QNN_SDK_ROOT=$PWD PYTHONPATH=$PWD \
+LD_LIBRARY_PATH=$PWD/libs/x86_64-linux-clang:$PWD/cxx/usr/lib/llvm-18/lib:$PY310LIB \
+    ./venv310/bin/python -c "from qti.aisw.converters.common import ir_graph; print('converter OK')"
+```
+
+Both are exercised for real by `../build_qnn.sh`, which is the definitive test.
 
 ## Board-side inference
 
