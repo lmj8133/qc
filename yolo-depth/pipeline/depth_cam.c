@@ -437,6 +437,37 @@ static void colourize(const __fp16 *depth, int S, const uint32_t *lut, uint32_t 
 	}
 }
 
+/*
+ * Build the side-by-side view: camera on the left, depth on the right, each SxS,
+ * giving a 2S x S BGRA frame. Seeing the source next to the depth map is what
+ * makes the output legible to someone who has not been staring at it -- a warm
+ * blob means nothing until you can see it is a person.
+ *
+ * The camera image is the cropped RGB (crop_w x crop_h, the same square the net
+ * saw), nearest-neighbour scaled to SxS so both panes align. Nearest is enough
+ * here: this is a preview, and it costs a fraction of the bilinear path.
+ */
+static void compose_side_by_side(const uint8_t *rgb, int crop_w, int crop_h,
+                                 const uint32_t *depth_bgra, int S, uint32_t *out)
+{
+	const int W = 2 * S;
+
+	for (int y = 0; y < S; y++) {
+		int sy = y * crop_h / S;
+		const uint8_t *srow = rgb + (size_t)sy * crop_w * 3;
+		uint32_t *orow = out + (size_t)y * W;
+
+		for (int x = 0; x < S; x++) {
+			int sx = x * crop_w / S;
+			const uint8_t *px = srow + (size_t)sx * 3;
+			/* rgb is R,G,B; the sink wants BGRA little-endian (B,G,R,A) */
+			orow[x] = 0xff000000u | ((uint32_t)px[0] << 16)
+			          | ((uint32_t)px[1] << 8) | (uint32_t)px[2];
+		}
+		memcpy(orow + S, depth_bgra + (size_t)y * S, (size_t)S * 4);
+	}
+}
+
 /* ------------------------------------------------------------ display --- */
 
 static int write_all(int fd, const uint8_t *buf, size_t len)
@@ -460,14 +491,16 @@ static int write_all(int fd, const uint8_t *buf, size_t len)
  * Weston's socket for root is at /run/user/root/wayland-1, NOT /run/user/0 --
  * waylandsink fails to reach PAUSED with the documented path.
  */
-static FILE *display_open(int S, int fps)
+static FILE *display_open(int w, int h, int fps)
 {
 	char cmd[768];
 	snprintf(cmd, sizeof(cmd),
 	         "XDG_RUNTIME_DIR=/run/user/root WAYLAND_DISPLAY=wayland-1 "
 	         "exec gst-launch-1.0 -q fdsrc fd=0 ! "
 	         "rawvideoparse use-sink-caps=false width=%d height=%d format=bgra "
-	         "framerate=%d/1 ! videoconvert ! waylandsink sync=false "
+	         /* No videoconvert: waylandsink takes BGRA natively, and at 2S wide
+	          * the extra copy cost ~6 ms/frame for nothing. */
+	         "framerate=%d/1 ! waylandsink sync=false "
 	         /* gst-launch prints a running position counter ("0:00:01.2 / ...")
 	          * to STDOUT even under -q, which floods an interactive ssh -t
 	          * session and hides our own stats lines. Only the child's stdin is
@@ -475,7 +508,7 @@ static FILE *display_open(int S, int fps)
 	          * drop both. Failures still surface: popen/write errors are caught
 	          * by the caller, and a dead sink shows up as a write failure. */
 	         ">/dev/null 2>&1",
-	         S, S, fps);
+	         w, h, fps);
 	FILE *p = popen(cmd, "w");
 	if (!p) {
 		fprintf(stderr, "WARN: popen(gst-launch-1.0) failed: %s\n", strerror(errno));
@@ -510,6 +543,7 @@ static void usage(const char *prog)
 "  --stats-every <N> Frames between stats lines      (default 30)\n"
 "  --no-display      Skip the GStreamer sink (headless benchmark)\n"
 "  --no-pin          Do not pin to the fastest CPU core (pinning is on by default)\n"
+"  --depth-only      Show only the depth map; default is camera|depth side by side\n"
 "  --help            This message\n"
 "\n"
 "Example:\n"
@@ -529,6 +563,7 @@ int main(int argc, char **argv)
 	int stats_every = 30;
 	int no_display = 0;
 	int no_pin = 0;
+	int depth_only = 0;
 
 	static struct option opts[] = {
 		{ "model",       required_argument, 0, 'm' },
@@ -538,12 +573,13 @@ int main(int argc, char **argv)
 		{ "stats-every", required_argument, 0, 'e' },
 		{ "no-display",  no_argument,       0, 'n' },
 		{ "no-pin",      no_argument,       0, 'p' },
+		{ "depth-only",  no_argument,       0, 'D' },
 		{ "help",        no_argument,       0, 'h' },
 		{ 0, 0, 0, 0 }
 	};
 
 	for (;;) {
-		int c = getopt_long(argc, argv, "m:d:s:f:e:nph", opts, NULL);
+		int c = getopt_long(argc, argv, "m:d:s:f:e:nphD", opts, NULL);
 		if (c == -1) {
 			break;
 		}
@@ -555,6 +591,7 @@ int main(int argc, char **argv)
 		case 'e': stats_every = atoi(optarg); break;
 		case 'n': no_display = 1; break;
 		case 'p': no_pin = 1; break;
+		case 'D': depth_only = 1; break;
 		case 'h': usage(argv[0]); return 0;
 		default: usage(argv[0]); return 2;
 		}
@@ -726,8 +763,10 @@ int main(int argc, char **argv)
 	const int crop_x = (CAP_W - crop_w) / 2;  /* 80 px dropped each side */
 	uint8_t *rgb = malloc((size_t)crop_w * crop_h * 3);
 	uint32_t *bgra = malloc((size_t)S * S * 4);
+	/* Side-by-side needs a 2S-wide frame; allocated once, like everything else. */
+	uint32_t *composite = depth_only ? NULL : malloc((size_t)S * 2 * S * 4);
 	uint32_t *lut = malloc(256 * sizeof(uint32_t));
-	CHECK(rgb && bgra && lut, "frame buffer alloc failed");
+	CHECK(rgb && bgra && lut && (depth_only || composite), "frame buffer alloc failed");
 	build_turbo_lut(lut);
 
 	__fp16 *net_in = (__fp16 *)ins[0].v1.clientBuf.data;
@@ -742,7 +781,7 @@ int main(int argc, char **argv)
 
 	FILE *disp = NULL;
 	if (!no_display) {
-		disp = display_open(S, 30);
+		disp = display_open(depth_only ? S : 2 * S, S, 30);
 		if (disp) {
 			printf("display          : gst-launch-1.0 fdsrc -> waylandsink (%dx%d BGRA)\n", S, S);
 		} else {
@@ -796,7 +835,18 @@ int main(int argc, char **argv)
 		double t4 = now_ms();
 
 		if (disp) {
-			if (write_all(fileno(disp), (const uint8_t *)bgra, (size_t)S * S * 4) < 0) {
+			const uint8_t *frame;
+			size_t frame_bytes;
+
+			if (depth_only) {
+				frame = (const uint8_t *)bgra;
+				frame_bytes = (size_t)S * S * 4;
+			} else {
+				compose_side_by_side(rgb, crop_w, crop_h, bgra, S, composite);
+				frame = (const uint8_t *)composite;
+				frame_bytes = (size_t)S * 2 * S * 4;
+			}
+			if (write_all(fileno(disp), frame, frame_bytes) < 0) {
 				fprintf(stderr, "WARN: display sink closed; continuing headless\n");
 				pclose(disp);
 				disp = NULL;
@@ -889,6 +939,7 @@ int main(int argc, char **argv)
 	sys.systemContextFree(sys_ctx);
 	free(rgb);
 	free(bgra);
+	free(composite);
 	free(lut);
 	free(bin_buf);
 	return rc;

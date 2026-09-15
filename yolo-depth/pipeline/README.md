@@ -110,6 +110,32 @@ Display costs ~8 ms/frame of *producer-blocking* time: the `write()` to the
 GStreamer child blocks once the sink's queue is full, so it doubles as the
 pacing mechanism. It is real cost, not measurement overhead.
 
+## Side-by-side view (default)
+
+The display shows **camera on the left, depth on the right**, each SxS, in one
+2S x S frame. The camera pane is the exact square the network saw (the 480x480
+centre crop), nearest-scaled so the two panes align pixel-for-pixel.
+
+This is for showing the thing to other people: a warm blob means nothing until
+you can see it is a person. Use `--depth-only` for the old depth-only view.
+
+Costs about 6.5 ms/frame of extra sink time, because the composited frame is
+twice as wide:
+
+| size | display pane | disp ms | **FPS** | note |
+|---|---|---|---|---|
+| **384** | 768 x 384 | 8.7 | **30.0** | camera-limited — full rate |
+| 512 | 1024 x 512 | 12.7 | 25.7 | |
+| 512 `--depth-only` | 512 x 512 | 5.9 | 29.5 | |
+
+**For a demo, use 384 side-by-side**: it runs at the full 30 fps and the pane is
+big enough to read on a monitor. 512 side-by-side looks slightly smoother in
+depth detail but drops to ~26 fps.
+
+Note the cost is the sink's blocking write, not colour conversion — `waylandsink`
+takes BGRA natively and dropping `videoconvert` changed nothing (measured).
+Removing it anyway, since it was a pure no-op in the path.
+
 ## Stopping it
 
 Ctrl-C. `run.sh` requests a TTY (`ssh -tt`) so the interrupt is delivered to the
