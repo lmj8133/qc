@@ -1,0 +1,14 @@
+# Flash image and SDK -- tens of GB, obtained from vendor releases
+flatten_image/
+sdk/
+*.7z
+
+# Build artifacts
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Compiled binaries
+sdk-test/hello

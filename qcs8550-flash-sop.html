@@ -1,0 +1,943 @@
+<title>QCS8550 EVB Flashing SOP</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground:      #F7F8FA;
+    --surface:     #FFFFFF;
+    --surface-alt: #EDF1F5;
+    --ink:         #16202B;
+    --ink-soft:    #46566A;
+    --ink-faint:   #6B7B8C;
+    --rule:        #D8E0E8;
+    --rule-soft:   #E7ECF1;
+
+    --accent:      #0B5E8A;
+    --accent-soft: #E3EFF6;
+    --accent-ink:  #084863;
+
+    --warn:        #B4530A;
+    --warn-soft:   #FBEEE1;
+    --warn-rule:   #E8C4A0;
+
+    --ok:          #0F6B57;
+    --ok-soft:     #E2F0EC;
+
+    --code-bg:     #17222E;
+    --code-ink:    #DCE6F0;
+    --code-dim:    #7E93A8;
+    --code-key:    #7FC4E8;
+    --code-str:    #CFAF7E;
+
+    --maxw: 60rem;
+    --measure: 68ch;
+
+    --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+    --f-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #10171F;
+      --surface:     #16202B;
+      --surface-alt: #1D2935;
+      --ink:         #E4EBF2;
+      --ink-soft:    #A8B8C8;
+      --ink-faint:   #7A8B9C;
+      --rule:        #2A3846;
+      --rule-soft:   #222E3A;
+
+      --accent:      #5AB4E0;
+      --accent-soft: #16303F;
+      --accent-ink:  #8ACCEC;
+
+      --warn:        #E8944A;
+      --warn-soft:   #2E2116;
+      --warn-rule:   #5A3D20;
+
+      --ok:          #4FBFA3;
+      --ok-soft:     #122A25;
+
+      --code-bg:     #0C131B;
+      --code-ink:    #DCE6F0;
+      --code-dim:    #6B8095;
+      --code-key:    #7FC4E8;
+      --code-str:    #CFAF7E;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #10171F;
+    --surface:     #16202B;
+    --surface-alt: #1D2935;
+    --ink:         #E4EBF2;
+    --ink-soft:    #A8B8C8;
+    --ink-faint:   #7A8B9C;
+    --rule:        #2A3846;
+    --rule-soft:   #222E3A;
+
+    --accent:      #5AB4E0;
+    --accent-soft: #16303F;
+    --accent-ink:  #8ACCEC;
+
+    --warn:        #E8944A;
+    --warn-soft:   #2E2116;
+    --warn-rule:   #5A3D20;
+
+    --ok:          #4FBFA3;
+    --ok-soft:     #122A25;
+
+    --code-bg:     #0C131B;
+    --code-ink:    #DCE6F0;
+    --code-dim:    #6B8095;
+    --code-key:    #7FC4E8;
+    --code-str:    #CFAF7E;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 16px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: var(--maxw);
+    margin: 0 auto;
+    padding: 0 1.75rem 6rem;
+  }
+
+  /* ---------- masthead ---------- */
+
+  header.mast {
+    border-bottom: 2px solid var(--ink);
+    padding: 3rem 0 1.5rem;
+    margin-bottom: 2.5rem;
+  }
+
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: 0.7rem;
+    font-weight: 500;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 1.1rem;
+  }
+
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: clamp(2rem, 5vw, 3.1rem);
+    line-height: 1.06;
+    letter-spacing: -0.022em;
+    margin: 0 0 0.85rem;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    font-size: 1.075rem;
+    color: var(--ink-soft);
+    max-width: var(--measure);
+    margin: 0 0 2rem;
+  }
+
+  .meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+    gap: 1.35rem 1.75rem;
+    border-top: 1px solid var(--rule);
+    padding-top: 1.35rem;
+  }
+  .meta div { display: flex; flex-direction: column; gap: 0.2rem; }
+  .meta dt {
+    font-family: var(--f-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .meta dd {
+    margin: 0;
+    font-size: 0.9rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- generic sections ---------- */
+
+  section { margin-bottom: 3.25rem; }
+
+  h2 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 1.5rem;
+    letter-spacing: -0.012em;
+    margin: 0 0 0.4rem;
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 1.02rem;
+    margin: 2rem 0 0.6rem;
+    letter-spacing: -0.005em;
+  }
+
+  .section-note {
+    color: var(--ink-soft);
+    max-width: var(--measure);
+    margin: 0 0 1.5rem;
+  }
+
+  p { max-width: var(--measure); }
+  p + p { margin-top: 0.85rem; }
+
+  .sec-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.9rem;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 0.7rem;
+    margin-bottom: 1.25rem;
+  }
+  .sec-head h2 { margin: 0; }
+  .sec-num {
+    font-family: var(--f-mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+    flex: none;
+  }
+
+  /* ---------- callouts ---------- */
+
+  .callout {
+    border: 1px solid var(--warn-rule);
+    border-left: 4px solid var(--warn);
+    background: var(--warn-soft);
+    padding: 1.15rem 1.35rem;
+    margin: 0 0 2.5rem;
+    border-radius: 3px;
+  }
+  .callout .co-title {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 0.78rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--warn);
+    margin: 0 0 0.5rem;
+  }
+  .callout p { margin: 0; color: var(--ink); max-width: var(--measure); }
+  .callout p + p { margin-top: 0.6rem; }
+
+  .note {
+    border-left: 3px solid var(--rule);
+    padding: 0.1rem 0 0.1rem 1.1rem;
+    margin: 1.25rem 0;
+    color: var(--ink-soft);
+    font-size: 0.94rem;
+  }
+  .note strong { color: var(--ink); font-weight: 600; }
+
+  /* ---------- code ---------- */
+
+  pre {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    font-family: var(--f-mono);
+    font-size: 0.83rem;
+    line-height: 1.75;
+    padding: 1rem 1.15rem;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin: 1rem 0;
+    tab-size: 2;
+  }
+  pre .c { color: var(--code-dim); }
+  pre .k { color: var(--code-key); }
+  pre .s { color: var(--code-str); }
+
+  code {
+    font-family: var(--f-mono);
+    font-size: 0.87em;
+    background: var(--surface-alt);
+    padding: 0.1em 0.38em;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  pre code { background: none; padding: 0; white-space: pre; }
+
+  /* ---------- steps ---------- */
+
+  ol.steps { list-style: none; margin: 0; padding: 0; counter-reset: step; }
+
+  ol.steps > li {
+    counter-increment: step;
+    position: relative;
+    padding: 0 0 2.25rem 3.4rem;
+    border-left: 1px solid var(--rule);
+    margin-left: 1.1rem;
+  }
+  ol.steps > li:last-child { border-left-color: transparent; padding-bottom: 0.5rem; }
+
+  ol.steps > li::before {
+    content: counter(step);
+    position: absolute;
+    left: -1.1rem;
+    top: -0.1rem;
+    width: 2.2rem;
+    height: 2.2rem;
+    display: grid;
+    place-items: center;
+    background: var(--accent);
+    color: #fff;
+    font-family: var(--f-mono);
+    font-size: 0.82rem;
+    font-weight: 600;
+    border-radius: 50%;
+  }
+  :root[data-theme="dark"] ol.steps > li::before { color: #0B1720; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) ol.steps > li::before { color: #0B1720; }
+  }
+
+  ol.steps h3 {
+    margin: 0 0 0.45rem;
+    font-size: 1.12rem;
+    padding-top: 0.1rem;
+  }
+  ol.steps p { margin: 0 0 0.5rem; }
+
+  /* ---------- tables ---------- */
+
+  .tbl-scroll { overflow-x: auto; margin: 1.1rem 0; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.89rem;
+    min-width: 34rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.62rem 0.85rem 0.62rem 0;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+  }
+  th {
+    font-family: var(--f-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 500;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  td code { white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: none; }
+
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ---------- checklist ---------- */
+
+  .checklist { list-style: none; margin: 1rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.1rem; }
+  .checklist li { border-bottom: 1px solid var(--rule-soft); }
+  .checklist li:last-child { border-bottom: none; }
+  .checklist label {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.6rem 0.2rem;
+    cursor: pointer;
+  }
+  .checklist input {
+    appearance: none;
+    flex: none;
+    width: 1.05rem;
+    height: 1.05rem;
+    margin-top: 0.28rem;
+    border: 1.5px solid var(--ink-faint);
+    border-radius: 3px;
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    background: var(--surface);
+  }
+  .checklist input:checked {
+    background: var(--ok);
+    border-color: var(--ok);
+  }
+  .checklist input:checked::after {
+    content: "";
+    width: 0.28rem;
+    height: 0.55rem;
+    border: solid #fff;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg) translate(-1px, -1.5px);
+  }
+  .checklist input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .checklist input:checked ~ .ck-text { color: var(--ink-faint); text-decoration: line-through; }
+  .ck-text { font-size: 0.94rem; transition: color 0.12s ease; }
+  .ck-text b { font-weight: 600; }
+
+  .ck-reset {
+    margin-top: 1rem;
+    font-family: var(--f-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    background: none;
+    border: 1px solid var(--rule);
+    color: var(--ink-soft);
+    padding: 0.4rem 0.8rem;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .ck-reset:hover { border-color: var(--accent); color: var(--accent); }
+  .ck-reset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---------- variant cards ---------- */
+
+  .variants { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; margin: 1.25rem 0; }
+  .variant {
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 1rem 1.1rem;
+    background: var(--surface);
+  }
+  .variant.is-match { border-color: var(--ok); background: var(--ok-soft); }
+  .variant h4 {
+    font-family: var(--f-mono);
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin: 0 0 0.3rem;
+  }
+  .variant .vbytes {
+    font-family: var(--f-mono);
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+    display: block;
+    margin-bottom: 0.55rem;
+    white-space: nowrap;
+    overflow-x: auto;
+  }
+  .variant .vbytes b { color: var(--ink); font-weight: 600; }
+  .variant p { font-size: 0.86rem; margin: 0; color: var(--ink-soft); }
+  .tag {
+    display: inline-block;
+    font-family: var(--f-mono);
+    font-size: 0.63rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.16rem 0.45rem;
+    border-radius: 2px;
+    background: var(--ok);
+    color: #fff;
+    margin-left: 0.4rem;
+    vertical-align: 0.12em;
+  }
+
+  /* ---------- verified strip ---------- */
+
+  .verified {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem 1.5rem;
+    background: var(--ok-soft);
+    border: 1px solid var(--ok);
+    border-radius: 4px;
+    padding: 0.9rem 1.15rem;
+    margin: 1.25rem 0;
+    font-size: 0.88rem;
+  }
+  .verified span { display: flex; align-items: baseline; gap: 0.45rem; }
+  .verified b {
+    font-family: var(--f-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ok);
+    font-weight: 600;
+  }
+  .verified .num { font-weight: 500; }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    margin-top: 3.5rem;
+    padding-top: 1.35rem;
+    color: var(--ink-faint);
+    font-size: 0.82rem;
+  }
+  footer p { max-width: var(--measure); }
+
+  a { color: var(--accent); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+
+  @media (max-width: 34rem) {
+    ol.steps > li { padding-left: 2.6rem; }
+    .wrap { padding: 0 1.15rem 4rem; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <p class="eyebrow">Algoltek · Hardware Bring-up · SOP-QCS8550-01</p>
+    <h1>Flashing the Ubuntu Image to a QCS8550 EVB</h1>
+    <p class="standfirst">
+      How to write the QTI Ubuntu fullstack image onto an Aida3 RDK socket board over USB,
+      using Qualcomm's EDL recovery protocol. Start to finish, about 20 minutes.
+    </p>
+    <dl class="meta">
+      <div><dt>Board</dt><dd>aida3_RDK_SOCKET Rev 1.0</dd></div>
+      <div><dt>SoC</dt><dd>QCS8550 (kalama)</dd></div>
+      <div><dt>Image</dt><dd class="num">V00.00.03</dd></div>
+      <div><dt>Host OS</dt><dd>Ubuntu 24.04 x86_64</dd></div>
+      <div><dt>Flash time</dt><dd class="num">~12 min</dd></div>
+      <div><dt>Last verified</dt><dd class="num">2026-09-14</dd></div>
+    </dl>
+  </header>
+
+  <div class="callout">
+    <p class="co-title">This erases the board completely</p>
+    <p>
+      Flashing rewrites the entire UFS storage — bootloader, TrustZone, boot, dtbo and roughly
+      21&nbsp;GB of system partitions. Everything currently on the device is destroyed, with no undo.
+    </p>
+    <p>
+      <strong>Once flashing starts, do not unplug the USB cable, power-cycle the board, or let the
+      host PC sleep.</strong> An interruption while the bootloader partitions are being written can
+      leave the board unable to boot on its own. That state is recoverable — see
+      <a href="#recovery">Recovery</a> — but only if you can force EDL mode in hardware.
+    </p>
+  </div>
+
+  <!-- ============ 1 ============ -->
+  <section id="how">
+    <div class="sec-head"><span class="sec-num">01</span><h2>How this works</h2></div>
+
+    <p class="section-note">
+      Worth understanding before you run anything, because it explains why the procedure is safe
+      to retry and hard to permanently break.
+    </p>
+
+    <p>
+      The board is flashed through <strong>EDL</strong> (Emergency Download Mode), a protocol built
+      into the SoC's Primary Boot Loader — mask ROM inside the chip itself. Because EDL lives in ROM,
+      nothing you write to storage can erase or corrupt it. That is the entire reason a failed flash
+      is recoverable.
+    </p>
+    <p>
+      The host tool is <code>qdl</code>, which speaks EDL over USB. It first uploads a small
+      programmer binary (<code>xbl_s_devprg_ns.melf</code>) into the SoC's memory, then streams every
+      partition image described by the <code>rawprogram*.xml</code> and <code>patch*.xml</code> files.
+      No working bootloader is needed on the board.
+    </p>
+
+    <p>You can tell the board's state from its USB ID alone:</p>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead>
+          <tr><th>USB ID</th><th>Mode</th><th>What it means</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>05c6:901d</code></td>
+            <td>Mission</td>
+            <td>Board booted normally into its OS. <code>adb</code> works. The script will switch it to EDL for you.</td>
+          </tr>
+          <tr>
+            <td><code>05c6:9008</code></td>
+            <td>EDL / QDL</td>
+            <td>Ready to be flashed right now. This is also what a non-booting board looks like, which is why a failed flash is fixable.</td>
+          </tr>
+          <tr>
+            <td class="ink-faint">nothing</td>
+            <td>—</td>
+            <td>No USB connection, no power, or the board needs a hardware EDL trigger.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 2 ============ -->
+  <section id="setup">
+    <div class="sec-head"><span class="sec-num">02</span><h2>One-time host setup</h2></div>
+
+    <p class="section-note">
+      Run these once per host PC. Skip if the machine has flashed a board before.
+    </p>
+
+    <h3>Install the tools</h3>
+<pre><code><span class="c"># 7-Zip to unpack the image archive, adb to switch the board into EDL</span>
+sudo apt update
+sudo apt install -y p7zip-full android-tools-adb</code></pre>
+
+    <h3>Allow USB access without root</h3>
+    <p>
+      <code>qdl</code> needs raw USB access. Without a udev rule you would have to run the whole
+      flash as root, which is worth avoiding.
+    </p>
+<pre><code>sudo tee /etc/udev/rules.d/51-qualcomm-edl.rules &lt;&lt;'EOF'
+SUBSYSTEM=="usb", ATTR{idVendor}=="05c6", MODE="0660", GROUP="plugdev"
+EOF
+
+sudo udevadm control --reload-rules
+sudo udevadm trigger</code></pre>
+
+    <p>Then confirm your account is in the <code>plugdev</code> group:</p>
+<pre><code>id -nG | tr ' ' '\n' | grep plugdev</code></pre>
+
+    <div class="note">
+      <strong>If that prints nothing:</strong> run <code>sudo usermod -aG plugdev $USER</code>,
+      then log out and back in. Group changes do not apply to an existing session.
+    </div>
+  </section>
+
+  <!-- ============ 3 ============ -->
+  <section id="variant">
+    <div class="sec-head"><span class="sec-num">03</span><h2>Confirm the board variant</h2></div>
+
+    <p class="section-note">
+      The flash script takes one argument — <code>rdk</code> or <code>grizzly</code>. This selects the
+      CDT (Configuration Data Table), a 24-byte block read by the first-stage bootloader to identify
+      which board it is running on. Get it wrong and the board may configure DDR or peripherals
+      incorrectly.
+    </p>
+
+    <div class="variants">
+      <div class="variant is-match">
+        <h4>rdk <span class="tag">our boards</span></h4>
+        <span class="vbytes">4344 5400 … 0200 <b>0300</b></span>
+        <p>Board ID <code>0x03</code>. Use this for <code>aida3_RDK_SOCKET</code>.</p>
+      </div>
+      <div class="variant">
+        <h4>grizzly</h4>
+        <span class="vbytes">4344 5400 … 0200 <b>0400</b></span>
+        <p>Board ID <code>0x04</code>. A different carrier board — do not use unless told to.</p>
+      </div>
+    </div>
+
+    <p>
+      The two files are identical except for that single byte. If you are ever unsure and the board
+      still boots, read the CDT it is already running and compare:
+    </p>
+
+<pre><code><span class="c"># On a board running the Ubuntu image</span>
+adb shell "dd if=/dev/disk/by-partlabel/cdt bs=1 count=24 2&gt;/dev/null | xxd"
+
+<span class="c"># Compare against the file you intend to flash</span>
+xxd aim300_rdk.bin</code></pre>
+
+    <div class="note">
+      <strong>Path differs by image.</strong> The Ubuntu image exposes partitions at
+      <code>/dev/disk/by-partlabel/</code>. The older Android-style image used
+      <code>/dev/block/by-name/</code>. Using the wrong path returns empty output, which looks
+      alarming but means nothing is wrong.
+    </div>
+  </section>
+
+  <!-- ============ 4 ============ -->
+  <section id="procedure">
+    <div class="sec-head"><span class="sec-num">04</span><h2>Flashing procedure</h2></div>
+
+    <ol class="steps">
+
+      <li>
+        <h3>Unpack the image archive</h3>
+        <p>Roughly 3.5&nbsp;GB compressed, expanding to about 21&nbsp;GB. Make sure you have at least
+        30&nbsp;GB free.</p>
+<pre><code>cd ~/work/qcs8550
+7z x qcs8550_ubuntu_flatten_V00.00.03.7z
+cd flatten_image</code></pre>
+        <p>You should now see <code>qdl_flash.sh</code>, a <code>QDL/</code> directory, the
+        <code>rawprogram*.xml</code> files and several hundred <code>system_*.img</code> chunks.</p>
+      </li>
+
+      <li>
+        <h3>Connect the board and confirm the host sees it</h3>
+        <p>Plug the EVB into the host over USB and power it on.</p>
+<pre><code>lsusb | grep -i qualcomm</code></pre>
+        <p>Expect either <code>05c6:901d</code> (booted) or <code>05c6:9008</code> (already in EDL).
+        Either is fine. If nothing appears, stop and fix the connection — do not proceed.</p>
+      </li>
+
+      <li>
+        <h3>Check the XML is clean</h3>
+        <p>The script temporarily writes the CDT filename into <code>rawprogram3.xml</code> and
+        restores it afterwards. If a previous run was interrupted, a stale value can be left behind.</p>
+<pre><code>grep 'label="cdt"' rawprogram3.xml | grep -o 'filename="[^"]*"'</code></pre>
+        <p>This must print <code>filename=""</code>. If it shows a <code>.bin</code> filename, clear
+        it before continuing.</p>
+      </li>
+
+      <li>
+        <h3>Run the flash</h3>
+        <p>One command. Pass your board variant from step 03.</p>
+<pre><code>./qdl_flash.sh rdk</code></pre>
+        <p>The script switches the board into EDL if needed, uploads the programmer, then writes every
+        partition. Logging the run is recommended:</p>
+<pre><code>./qdl_flash.sh rdk 2&gt;&amp;1 | tee flash.log</code></pre>
+      </li>
+
+      <li>
+        <h3>Wait — and leave it alone</h3>
+        <p>Expect around 12 minutes at roughly 30&nbsp;MB/s. Progress appears as a long series of
+        <code>flashed "system" successfully</code> lines.</p>
+        <p>Do not touch the cable, the board, or the host. When it finishes you will see
+        <code>[Step 5] Flashing completed!</code> and the board reboots itself into the new image
+        within about 20 seconds.</p>
+      </li>
+
+    </ol>
+  </section>
+
+  <!-- ============ 5 ============ -->
+  <section id="verify">
+    <div class="sec-head"><span class="sec-num">05</span><h2>Verify the result</h2></div>
+
+    <p class="section-note">
+      Work through these after the board comes back up. Ticks are saved in your browser only.
+    </p>
+
+<pre><code><span class="c"># Board is back on USB in Mission mode</span>
+lsusb | grep -i qualcomm
+
+<span class="c"># adb reports the Ubuntu product string</span>
+adb devices -l
+
+<span class="c"># Confirm the OS and kernel</span>
+adb shell "cat /etc/os-release | head -3; uname -a"</code></pre>
+
+    <ul class="checklist" id="checklist">
+      <li><label><input type="checkbox" data-ck="1"><span class="ck-text">Flash log contains <b>no</b> lines matching <code>error</code>, <code>fail</code> or <code>abort</code></span></label></li>
+      <li><label><input type="checkbox" data-ck="2"><span class="ck-text">Log ends with <b>[Step 5] Flashing completed!</b></span></label></li>
+      <li><label><input type="checkbox" data-ck="3"><span class="ck-text">Board re-enumerates as <code>05c6:901d</code></span></label></li>
+      <li><label><input type="checkbox" data-ck="4"><span class="ck-text"><code>adb devices -l</code> shows product <b>kalama-qti-distro-ubuntu-fullstack-debug</b></span></label></li>
+      <li><label><input type="checkbox" data-ck="5"><span class="ck-text"><code>/etc/os-release</code> reports <b>Ubuntu 22.04 LTS (Jammy)</b></span></label></li>
+      <li><label><input type="checkbox" data-ck="6"><span class="ck-text">Kernel string contains <b>5.15.170</b></span></label></li>
+      <li><label><input type="checkbox" data-ck="7"><span class="ck-text"><code>rawprogram3.xml</code> restored to <code>filename=""</code></span></label></li>
+    </ul>
+    <button class="ck-reset" id="ck-reset" type="button">Reset checklist</button>
+
+    <h3>Reference result</h3>
+    <p>A known-good run on <code>aida3_RDK_SOCKET Rev 1.0</code>, for comparison:</p>
+
+    <div class="verified">
+      <span><b>Duration</b> <span class="num">11m 35s</span></span>
+      <span><b>Throughput</b> <span class="num">25.8–32.8 MB/s</span></span>
+      <span><b>Log lines</b> <span class="num">818</span></span>
+      <span><b>Errors</b> <span class="num">0</span></span>
+      <span><b>Exit code</b> <span class="num">0</span></span>
+    </div>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Property</th><th>Before flash</th><th>After flash</th></tr></thead>
+        <tbody>
+          <tr><td>OS</td><td>Toybox (Android-style)</td><td>Ubuntu 22.04.2 LTS</td></tr>
+          <tr><td>Kernel</td><td class="num">5.15.144 … 00006-g168400eb027f</td><td class="num">5.15.170 … 00002-g576728c775df</td></tr>
+          <tr><td>adb product</td><td><code>kalama</code></td><td><code>kalama-qti-distro-ubuntu-fullstack-debug</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note">
+      <strong>Kernel hash matters.</strong> The <code>g576728c775df</code> suffix must match the
+      <code>Metadata Revision</code> in the application SDK's <code>version-aarch64-oe-linux</code>
+      file. When they match, binaries cross-compiled with that SDK link against exactly the libraries
+      present on the device.
+    </div>
+  </section>
+
+  <!-- ============ 6 ============ -->
+  <section id="trouble">
+    <div class="sec-head"><span class="sec-num">06</span><h2>Troubleshooting</h2></div>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th style="width:34%">Symptom</th><th>Cause and fix</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>No Qualcomm device is detected</code></td>
+            <td>Board not powered, wrong USB port, or a charge-only cable. Confirm with <code>lsusb</code> before rerunning.</td>
+          </tr>
+          <tr>
+            <td><code>Permission denied</code> from qdl</td>
+            <td>udev rule missing or group not applied. Re-check section 02; remember group changes need a fresh login.</td>
+          </tr>
+          <tr>
+            <td>Stuck at <code>waiting for programmer…</code></td>
+            <td>The board entered EDL but did not accept the programmer. Power-cycle the board, let it reach EDL again, and rerun.</td>
+          </tr>
+          <tr>
+            <td><code>adb wait-for-device</code> never returns</td>
+            <td>Board is in Mission mode but adb cannot see it. Check <code>adb devices</code>; if empty, the udev rule for <code>05c6</code> is missing.</td>
+          </tr>
+          <tr>
+            <td>Flash aborted partway</td>
+            <td>Board is almost certainly still in EDL (<code>05c6:9008</code>). Clear the stale CDT entry from <code>rawprogram3.xml</code>, then rerun the same command.</td>
+          </tr>
+          <tr>
+            <td>Board does not re-enumerate after flashing</td>
+            <td>Wait a full minute first — the first boot after a flash is slow. Then power-cycle. If still absent, go to Recovery.</td>
+          </tr>
+          <tr>
+            <td>CDT read returns nothing</td>
+            <td>Wrong partition path for the running image. Ubuntu uses <code>/dev/disk/by-partlabel/</code>, not <code>/dev/block/by-name/</code>. Not a fault.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 7 ============ -->
+  <section id="recovery">
+    <div class="sec-head"><span class="sec-num">07</span><h2>Recovery</h2></div>
+
+    <p class="section-note">
+      A board that will not boot is not a dead board. Work down this ladder.
+    </p>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th style="width:24%">State</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><b>Boots normally</b></td>
+            <td>Nothing special — just rerun <code>./qdl_flash.sh rdk</code>.</td>
+          </tr>
+          <tr>
+            <td><b>Will not boot, but shows <code>05c6:9008</code></b></td>
+            <td>Rerun the same command. The script detects EDL directly and skips the adb step entirely. This is the normal outcome of a bad flash.</td>
+          </tr>
+          <tr>
+            <td><b>Nothing on USB at all</b></td>
+            <td>Force EDL in hardware using the board's EDL button, jumper, or test points, then flash as normal.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout" style="margin-top:1.5rem">
+      <p class="co-title">Find the EDL trigger before you need it</p>
+      <p>
+        Locate your board's hardware EDL button or jumper and note it somewhere findable — ideally
+        before your first flash. It is the difference between a five-minute recovery and a board
+        sitting on a shelf. Check the <code>aida3_RDK_SOCKET</code> schematic or ask the hardware team.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ 8 ============ -->
+  <section id="ref">
+    <div class="sec-head"><span class="sec-num">08</span><h2>Reference</h2></div>
+
+    <h3>Key files in <code>flatten_image/</code></h3>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th style="width:36%">File</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>qdl_flash.sh</code></td><td>The flash script. Linux entry point.</td></tr>
+          <tr><td><code>QDL/qdl</code></td><td>EDL client binary (x86-64 Linux).</td></tr>
+          <tr><td><code>xbl_s_devprg_ns.melf</code></td><td>Programmer uploaded into the SoC before flashing.</td></tr>
+          <tr><td><code>rawprogram*.xml</code></td><td>Partition layout and image mapping.</td></tr>
+          <tr><td><code>patch*.xml</code></td><td>Post-write GPT patches.</td></tr>
+          <tr><td><code>aim300_rdk.bin</code></td><td>CDT for the RDK carrier board.</td></tr>
+          <tr><td><code>aim300_grizzly.bin</code></td><td>CDT for the Grizzly carrier board.</td></tr>
+          <tr><td><code>boot.img</code>, <code>system_*.img</code></td><td>Kernel, ramdisk and rootfs chunks.</td></tr>
+          <tr><td><code>win-tools/</code></td><td>Windows flashing path — see below.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Flashing from Windows instead</h3>
+    <p>
+      If you have no Linux host, the same image set flashes from Windows. It needs Qualcomm's USB
+      driver installed so the board appears as <code>QCOM USB QDLoader 9008</code>.
+    </p>
+<pre><code>aim_image_loader.bat rdk auto</code></pre>
+    <p>
+      <code>auto</code> detects the 9008 COM port; pass a port number instead if detection fails.
+      This path uses <code>rawprogram3_rdk.xml</code> directly rather than patching the XML, so the
+      step-03 cleanliness check does not apply.
+    </p>
+
+    <h3>After flashing: running your own binaries</h3>
+    <p>
+      Applications built with the QCS8550 application SDK can be pushed straight to the board:
+    </p>
+<pre><code><span class="c"># On the host, in an SDK-configured shell</span>
+. ~/work/qcs8550/sdk/environment-setup-aarch64-oe-linux
+$CC hello.c -o hello
+
+adb push hello /data/
+adb shell "chmod +x /data/hello &amp;&amp; /data/hello"</code></pre>
+  </section>
+
+  <footer>
+    <p>
+      SOP-QCS8550-01 · Procedure verified end to end on 2026-09-14 against
+      <code>aida3_RDK_SOCKET Rev 1.0</code> with image <code>V00.00.03</code>, flashed from
+      Ubuntu 24.04. Timings and log figures quoted throughout are from that run.
+    </p>
+    <p style="margin-top:0.6rem">
+      Update the <em>Last verified</em> date in the header whenever this procedure is re-run against
+      a new image release.
+    </p>
+  </footer>
+
+</div>
+
+<script>
+  (function () {
+    var KEY = 'qcs8550-sop-checklist-v1';
+    var boxes = Array.prototype.slice.call(document.querySelectorAll('#checklist input[data-ck]'));
+
+    function load() {
+      var saved = null;
+      try { saved = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { saved = {}; }
+      if (!saved || typeof saved !== 'object') saved = {};
+      boxes.forEach(function (b) {
+        if (saved[b.getAttribute('data-ck')]) b.checked = true;
+      });
+    }
+
+    function save() {
+      var state = {};
+      boxes.forEach(function (b) {
+        if (b.checked) state[b.getAttribute('data-ck')] = 1;
+      });
+      try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* storage unavailable */ }
+    }
+
+    boxes.forEach(function (b) { b.addEventListener('change', save); });
+
+    var reset = document.getElementById('ck-reset');
+    if (reset) {
+      reset.addEventListener('click', function () {
+        boxes.forEach(function (b) { b.checked = false; });
+        save();
+      });
+    }
+
+    load();
+  })();
+</script>
