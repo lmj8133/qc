@@ -152,6 +152,36 @@ almost exhausts the 33.3 ms budget before preprocessing is counted.
 The stages are strictly serial, so they add. Getting 640 to 30 FPS would need preprocessing
 overlapped with inference (double-buffer + thread) or the resize moved off the CPU.
 
+## Design decision: stay single-threaded (target application is obstacle avoidance)
+
+The loop is strictly serial — capture, preprocess, infer, colourize, display all
+add up. A double-buffered (ping-pong) design would overlap CPU preprocessing with
+NPU inference, turning the sum into a max:
+
+```
+now:        11.6 + 30.9 + 2.3  = 44.8 ms  -> 22.4 FPS   (640px)
+overlapped: max(11.6 + 2.3, 30.9) = 30.9 ms -> 32 FPS
+```
+
+**Deliberately not done.** Two reasons, and the second is the important one:
+
+1. At 512px the pipeline is already **camera-limited**, not compute-limited. The
+   sensor tops out at 30 fps, so overlapping would buy zero extra frames.
+2. **The target application is obstacle avoidance.** Pipelining raises throughput
+   but adds roughly one stage of latency to each individual frame: the depth map
+   you act on is older by the time it reaches you. For live viewing that is
+   invisible; for a control loop reacting to an obstacle, glass-to-decision
+   latency is the number that matters, not frames per second.
+
+It also costs real complexity — two threads sharing tensor buffers need
+mutex/condvar synchronisation, and the current loop's zero-allocation,
+single-threaded structure is easy to reason about and hard to get wrong.
+
+Revisit only if a genuine need for >= 640px accuracy appears, or the camera is
+replaced with one that exceeds 30 fps. If it is revisited, **measure end-to-end
+latency, not just FPS** — for this application a faster number that arrives later
+is a regression.
+
 ## CPU pinning is load-bearing, not a micro-optimization
 
 This SoC is a 3+4+1 big.LITTLE: cpu0-2 cap at 2.02 GHz, cpu3-6 at 2.80 GHz,
