@@ -168,7 +168,7 @@ Symptom to recognise: a later run fails with
 `ERROR: VIDIOC_S_FMT: Device or resource busy` — an earlier instance still owns
 `/dev/video2`.
 
-## Model size: 512 is the one to use
+## Model size: 512 for headless, 384 for a live demo
 
 End-to-end, 300+ frames each, headless and pinned:
 
@@ -179,9 +179,14 @@ End-to-end, 300+ frames each, headless and pinned:
 | 640 | 11.6 ms | 30.9 ms | 44.8 ms | 22.4 | compute |
 | 768 | ~15 ms | 42.0 ms | 60.7 ms | 16.5 | compute |
 
-**512 is the sweet spot.** It hits the 30 FPS camera ceiling, so 384 buys nothing — both are
-camera-limited, and 384 only loses accuracy. 640 misses 30 FPS because inference alone (30.9 ms)
-almost exhausts the 33.3 ms budget before preprocessing is counted.
+**512 is the sweet spot when nothing is being displayed.** It hits the 30 FPS camera ceiling, so
+384 buys no extra frames headless — both are camera-limited, and 384 only loses accuracy. 640
+misses 30 FPS because inference alone (30.9 ms) almost exhausts the 33.3 ms budget before
+preprocessing is counted.
+
+**With the side-by-side display on, prefer 384.** The composited frame is twice as wide and the
+sink's blocking write costs ~6.5 ms/frame, which pushes 512 down to 25.7 FPS while 384 stays at
+the full 30.0. See the side-by-side section above for the measured table.
 
 The stages are strictly serial, so they add. Getting 640 to 30 FPS would need preprocessing
 overlapped with inference (double-buffer + thread) or the resize moved off the CPU.
@@ -272,7 +277,8 @@ exit 0), but see the caveat below about on-screen confirmation.
 ## Verified
 
 - Compiles clean with `-Wall -Wextra`.
-- 512px: 30.1 FPS headless / 29.5 FPS with display, exit 0, steady.
+- 512px: 30.1 FPS headless / 25.7 FPS with the default side-by-side display
+  (29.5 FPS with `--depth-only`), exit 0, steady.
 - 640px: 22.4 FPS headless / 20.3 FPS with display, exit 0, steady.
 - 1200-frame run: FPS flat across 200-frame blocks, `VmRSS` constant at
   24992 kB, no thermal drift (inference +0.036 ms first-200 vs last-200).

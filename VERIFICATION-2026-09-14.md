@@ -40,6 +40,10 @@
 | 音訊 | card `pal.audio.primary`；sink `low-latency0` / `offload0`；source `regular0` |
 | 網路 | eth0 `192.168.3.63/24`（DHCP）；wlan0 為 DOWN |
 
+> ⚠️ **本文件內的 `192.168.3.63` 是撰寫當下的 IP，現已變更為 `192.168.3.80`。**
+> IP 由 DHCP 配發會變動（見 §7）。直接複製本文件的指令會連不上 —— 先確認當前 IP，
+> 或改用 `yolo-depth/pipeline/run.sh`（預設已指向現行位址，可用 `BOARD=<ip>` 覆寫）。
+
 **未完成**（詳見 §12）：Camera、麥克風、AI — 前兩項待硬體到貨，AI 缺模型檔。
 
 **應回報文件維護者**（詳見 §13）：§6 音訊環境變數（高）、§7 SSH 密碼登入（高）、§10 sensor 型號不符（中）、§8 SDK README 兩處（低）、燒錄耗時差異（低）。

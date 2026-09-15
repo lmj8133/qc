@@ -62,7 +62,7 @@ cp -a /tmp/llvm18/usr cxx/
 # 3. A Python 3.10 venv for the converter CLIs (they fail at `import numpy` otherwise).
 uv venv --python 3.10 venv310
 VIRTUAL_ENV=venv310 uv pip install \
-    numpy==1.26.4 onnx==1.17.0 onnxruntime==1.23.2 onnxsim protobuf PyYAML sympy
+    numpy==1.26.4 onnx==1.17.0 onnxruntime==1.23.2 onnxsim protobuf PyYAML sympy pandas
 ```
 
 Verify the result — this must print the board's own SDK version,
