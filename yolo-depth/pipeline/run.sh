@@ -18,6 +18,9 @@ BOARD="${BOARD:-192.168.3.80}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="y26n_${SIZE}_fp16_v73.bin"
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 root@${BOARD}"
+# -t allocates a TTY so Ctrl-C reaches the remote process group. Without it the
+# local ssh dies on Ctrl-C and depth_cam keeps running on the board forever.
+SSH_TTY="ssh -tt -o BatchMode=yes -o ConnectTimeout=10 root@${BOARD}"
 
 [ -f "$HERE/../artifacts/$BIN" ] || {
 	echo "ERROR: $HERE/../artifacts/$BIN not found. Build it first:" >&2
@@ -38,11 +41,25 @@ echo "==> building on $BOARD"
 echo "==> staging $BIN"
 scp -q -o BatchMode=yes "$HERE/../artifacts/$BIN" "root@${BOARD}:/dev/shm/"
 
-echo "==> running (${SIZE}px, $MODE)"
+echo "==> running (${SIZE}px, $MODE)   [Ctrl-C to stop]"
+
+# Clean up on the board even if the SSH connection itself is lost (dropped
+# link, closed laptop, killed terminal) -- in that case no signal is delivered
+# remotely and depth_cam would otherwise keep holding the camera.
+cleanup() {
+	$SSH 'pkill -x depth_cam; pkill -f "gst-launch-1.0 -q fdsrc"' >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
 # XDG_RUNTIME_DIR: Weston's socket is at /run/user/root, NOT /run/user/0.
-$SSH "bash -lc '
+#
+# -tt gives the remote command a TTY so Ctrl-C is delivered as SIGINT to the
+# remote process group; depth_cam traps SIGINT/SIGTERM and shuts down cleanly.
+# The remote shell also traps EXIT so the gst-launch child dies with it.
+$SSH_TTY "bash -lc '
+	trap \"pkill -P \\\$\\\$ 2>/dev/null; exit\" EXIT INT TERM
 	source /opt/qcom/qirp-sdk/qirp-setup.sh >/dev/null 2>&1
 	export LD_LIBRARY_PATH=/opt/qcom/qirp-sdk/lib/aarch64-oe-linux-gcc11.2:\$LD_LIBRARY_PATH
 	export XDG_RUNTIME_DIR=/run/user/root WAYLAND_DISPLAY=wayland-1
-	cd /dev/shm && ./depth_cam --model $BIN $ARGS
+	cd /dev/shm && exec ./depth_cam --model $BIN $ARGS
 '"

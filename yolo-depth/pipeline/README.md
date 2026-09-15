@@ -110,6 +110,30 @@ Display costs ~8 ms/frame of *producer-blocking* time: the `write()` to the
 GStreamer child blocks once the sink's queue is full, so it doubles as the
 pacing mechanism. It is real cost, not measurement overhead.
 
+## Stopping it
+
+Ctrl-C. `run.sh` requests a TTY (`ssh -tt`) so the interrupt is delivered to the
+remote process group, and `depth_cam` traps `SIGINT`/`SIGTERM` to shut down
+cleanly. A plain `ssh` without a TTY does NOT do this: Ctrl-C kills only the
+local client and leaves `depth_cam` running on the board, holding the camera.
+
+Belt and braces, because a dropped link delivers no signal at all:
+
+- the remote shell traps `EXIT` and kills its children, so the `gst-launch`
+  child dies with it;
+- `run.sh` traps `EXIT`/`INT`/`TERM` locally and issues a remote `pkill` as a
+  final sweep.
+
+If something ever does survive (say the board was power-cycled mid-run):
+
+```bash
+ssh root@192.168.3.80 'pkill -x depth_cam; pkill -f gst-launch-1.0'
+```
+
+Symptom to recognise: a later run fails with
+`ERROR: VIDIOC_S_FMT: Device or resource busy` — an earlier instance still owns
+`/dev/video2`.
+
 ## Model size: 512 is the one to use
 
 End-to-end, 300+ frames each, headless and pinned:

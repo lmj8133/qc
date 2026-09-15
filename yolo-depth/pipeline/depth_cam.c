@@ -467,7 +467,14 @@ static FILE *display_open(int S, int fps)
 	         "XDG_RUNTIME_DIR=/run/user/root WAYLAND_DISPLAY=wayland-1 "
 	         "exec gst-launch-1.0 -q fdsrc fd=0 ! "
 	         "rawvideoparse use-sink-caps=false width=%d height=%d format=bgra "
-	         "framerate=%d/1 ! videoconvert ! waylandsink sync=false",
+	         "framerate=%d/1 ! videoconvert ! waylandsink sync=false "
+	         /* gst-launch prints a running position counter ("0:00:01.2 / ...")
+	          * to STDOUT even under -q, which floods an interactive ssh -t
+	          * session and hides our own stats lines. Only the child's stdin is
+	          * ours (the pipe); its stdout/stderr just inherit our terminal, so
+	          * drop both. Failures still surface: popen/write errors are caught
+	          * by the caller, and a dead sink shows up as a write failure. */
+	         ">/dev/null 2>&1",
 	         S, S, fps);
 	FILE *p = popen(cmd, "w");
 	if (!p) {
