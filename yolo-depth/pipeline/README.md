@@ -104,6 +104,7 @@ cd /dev/shm
 | `--probe-patch <N>` | 32 | Side of that patch, in model pixels; clamped to the model input |
 | `--text-scale <N>` | auto | Pixel size of one font dot in the overlay reading (auto = 2 below 512px, else 3) |
 | `--fullscreen` | off | Scale the display to fill the panel |
+| `--snap-dir <path>` | `/dev/shm` | Where the `s` key writes PNG snapshots |
 | `--help` | | Usage with an example |
 
 Exit code 0 on success, non-zero on failure.
@@ -184,7 +185,39 @@ overlay exists to prevent, and it is why the reading is only trustworthy when
 you can see where the box landed.
 
 The glyphs come from a 3x5 bitmap font built into the program; the board has no
-font reachable from a plain C program.
+font reachable from a plain C program. There is no `m` suffix on the number:
+three columns cannot carry the middle stem that separates an `m` from an `n`,
+and the first screenshot read `17.38н`.
+
+**Press `s` to save the frame as a PNG**, exactly as displayed, into
+`--snap-dir` (default `/dev/shm`). Each save prints the path and the reading:
+
+```
+saved /dev/shm/shot-001.png  (centre 13.461 m)
+```
+
+That file is the evidence for a measurement — it shows where the box actually
+landed, which is the difference between a trustworthy reading and a stable,
+plausible, wrong one. Encoding runs through GStreamer's `pngenc` (no libpng on
+the board) and costs ~135 ms, so it is excluded from the stage timings and the
+run clock is shifted to match; steady state stays 30.2 FPS. The key needs a
+terminal, so it is simply inert when stdout is piped or redirected.
+
+### ⚠️ The camera halves its own frame rate in dim light
+
+This UVC camera exposes `V4L2_CID_EXPOSURE_AUTO_PRIORITY`
+(`exposure_dynamic_framerate`), which lets it drop to 15 fps to buy exposure
+time. Office lighting was enough to trigger it, and the symptom is a clean
+**15.2 FPS with capture at ~48 ms** — indistinguishable from a pipeline
+regression unless you know to look for it.
+
+`cam_open()` now clears the control at startup and warns if the camera refuses,
+so a run measures 30 fps rather than whatever the camera felt like doing. To
+check by hand:
+
+```bash
+v4l2-ctl -d /dev/video2 -l | grep dynamic      # want value=0
+```
 
 **Headless or `--depth-only`** prints a reading every frame instead, since a
 tape measure will not hold still for `--stats-every` frames:

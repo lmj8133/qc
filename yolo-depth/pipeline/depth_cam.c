@@ -42,6 +42,8 @@
 #include <unistd.h>
 #include <linux/videodev2.h>
 #include <sched.h>
+#include <sys/select.h>
+#include <termios.h>
 
 #include "QnnInterface.h"
 #include "QnnContext.h"
@@ -203,6 +205,28 @@ static int cam_open(struct v4l2_cam *c, const char *dev)
 	parm.parm.capture.timeperframe.numerator = 1;
 	parm.parm.capture.timeperframe.denominator = 30;
 	xioctl(c->fd, VIDIOC_S_PARM, &parm);
+
+	/*
+	 * Asking for 30 fps is not enough: this UVC camera also has
+	 * V4L2_CID_EXPOSURE_AUTO_PRIORITY ("exposure_dynamic_framerate"), which
+	 * lets it halve the frame rate to buy exposure time in dim light. Office
+	 * lighting was enough to trigger it, and the symptom is a clean 15.2 fps
+	 * with capture at ~48 ms -- indistinguishable from a pipeline regression
+	 * unless you know to look. Clear it and say so, rather than silently
+	 * measuring whatever the camera felt like doing.
+	 */
+	struct v4l2_control ctrl;
+	memset(&ctrl, 0, sizeof(ctrl));
+	ctrl.id = V4L2_CID_EXPOSURE_AUTO_PRIORITY;
+	ctrl.value = 0;
+	if (xioctl(c->fd, VIDIOC_S_CTRL, &ctrl) == 0) {
+		struct v4l2_control rb;
+		memset(&rb, 0, sizeof(rb));
+		rb.id = V4L2_CID_EXPOSURE_AUTO_PRIORITY;
+		if (xioctl(c->fd, VIDIOC_G_CTRL, &rb) == 0 && rb.value != 0) {
+			fprintf(stderr, "WARN: camera kept dynamic framerate on; fps may halve\n");
+		}
+	}
 
 	memset(&req, 0, sizeof(req));
 	req.count = V4L2_BUFFERS;
@@ -478,17 +502,21 @@ static void compose_side_by_side(const uint8_t *rgb, int crop_w, int crop_h,
 /* ------------------------------------------------- probe overlay --------- */
 
 /*
- * A 3x5 bitmap font, just the glyphs a depth reading needs: "0123456789.m".
+ * A 3x5 bitmap font, just the glyphs a depth reading needs: "0123456789.".
  * The board has no font of any kind reachable from a plain C program, and the
  * alternative -- reading the number off an SSH terminal while holding a tape
  * measure against a wall -- is how you end up trusting a patch that was
  * actually aimed at the floor. Each byte is one row, bit 2 is the leftmost
  * pixel, so 0b101 is two dots with a gap.
+ *
+ * No 'm' unit suffix: three columns cannot carry the middle stem that separates
+ * an 'm' from an 'n', and the first screenshot read "17.38н". A glyph that has
+ * to be guessed at is worse than no glyph, and the units are never in doubt.
  */
 #define GLYPH_W 3
 #define GLYPH_H 5
 
-static const uint8_t font3x5[12][GLYPH_H] = {
+static const uint8_t font3x5[11][GLYPH_H] = {
 	{ 0x7, 0x5, 0x5, 0x5, 0x7 },   /* 0 */
 	{ 0x2, 0x2, 0x2, 0x2, 0x2 },   /* 1 */
 	{ 0x7, 0x1, 0x7, 0x4, 0x7 },   /* 2 */
@@ -500,8 +528,6 @@ static const uint8_t font3x5[12][GLYPH_H] = {
 	{ 0x7, 0x5, 0x7, 0x5, 0x7 },   /* 8 */
 	{ 0x7, 0x5, 0x7, 0x1, 0x7 },   /* 9 */
 	{ 0x0, 0x0, 0x0, 0x0, 0x2 },   /* . */
-	{ 0x0, 0x0, 0x5, 0x7, 0x5 },   /* m -- 3x5 cannot do better: two legs, a
-	                                * bridge, and a gap on the top row */
 };
 
 /* Maps a character to its index in font3x5, or -1 for anything unprintable. */
@@ -512,9 +538,6 @@ static int glyph_index(char c)
 	}
 	if (c == '.') {
 		return 10;
-	}
-	if (c == 'm') {
-		return 11;
 	}
 	return -1;
 }
@@ -620,7 +643,7 @@ static void draw_probe_overlay(uint32_t *composite, int S, int patch, float metr
 	/* 0 = pick a size that stays legible without covering the box; the reading
 	 * is the point of the overlay, so a caller may ask for bigger. */
 	int sc = text_scale > 0 ? text_scale : ((S >= 512) ? 3 : 2);
-	snprintf(label, sizeof(label), "%.2fm", (double)metres);
+	snprintf(label, sizeof(label), "%.2f", (double)metres);
 
 	/* Below the box, or above it when the box is close to the bottom edge. */
 	int ty = y0 + h + 4 * sc;
@@ -643,6 +666,97 @@ static void draw_probe_overlay(uint32_t *composite, int S, int patch, float metr
 	}
 	draw_text(composite, W, S, tx, ty, sc, label, white, black);
 	draw_text(composite, W, S, S + tx, ty, sc, label, white, black);
+}
+
+/* ----------------------------------------------------------- snapshot --- */
+
+/*
+ * Write one composed frame to a PNG, exactly as it appears on screen.
+ *
+ * The board has no libpng, but it does have GStreamer, so encoding is a child
+ * pipeline fed the raw BGRA on stdin. Encoding a 768x384 frame measured 135 ms
+ * -- four frame periods -- so this must not block the loop: the child is left
+ * to run and reaped without waiting. The caller passes a private copy of the
+ * frame because the loop overwrites its own buffers on the next iteration.
+ */
+static int snapshot_png(const uint8_t *bgra, int w, int h, const char *path)
+{
+	char cmd[768];
+	snprintf(cmd, sizeof(cmd),
+	         "exec gst-launch-1.0 -q fdsrc fd=0 ! "
+	         "rawvideoparse use-sink-caps=false width=%d height=%d format=bgra "
+	         "framerate=1/1 ! videoconvert ! pngenc ! filesink location=%s "
+	         ">/dev/null 2>&1",
+	         w, h, path);
+
+	FILE *p = popen(cmd, "w");
+	if (!p) {
+		fprintf(stderr, "WARN: snapshot popen: %s\n", strerror(errno));
+		return -1;
+	}
+	size_t bytes = (size_t)w * h * 4;
+	int rc = (fwrite(bgra, 1, bytes, p) == bytes) ? 0 : -1;
+	/* pclose waits for the encoder, which is the 135 ms. Accepted here because
+	 * a snapshot is an explicit, occasional act by someone holding a tape
+	 * measure -- dropping four frames is invisible and the alternative is
+	 * tracking child state across iterations for no real gain. */
+	if (pclose(p) != 0) {
+		rc = -1;
+	}
+	if (rc != 0) {
+		fprintf(stderr, "WARN: snapshot %s failed\n", path);
+	}
+	return rc;
+}
+
+/*
+ * True when a key is waiting on stdin. Used to poll for the snapshot key
+ * without ever blocking the pipeline: no key, no cost.
+ */
+static int key_pending(void)
+{
+	struct timeval tv = { 0, 0 };
+	fd_set fds;
+
+	FD_ZERO(&fds);
+	FD_SET(STDIN_FILENO, &fds);
+	return select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0;
+}
+
+/*
+ * Put the terminal in cbreak mode so a single keypress arrives without Enter,
+ * and keep the original to restore on exit. Returns 0 if stdin is a terminal
+ * and the mode was changed, -1 otherwise (a pipe or redirect, where the key
+ * feature simply does not apply).
+ */
+static struct termios g_tio_saved;
+static int g_tio_active = 0;
+
+static int term_cbreak(void)
+{
+	struct termios tio;
+
+	if (!isatty(STDIN_FILENO) || tcgetattr(STDIN_FILENO, &g_tio_saved) != 0) {
+		return -1;
+	}
+	tio = g_tio_saved;
+	/* Leave ISIG on: Ctrl-C must still stop the pipeline. */
+	tio.c_lflag &= (unsigned)~(ICANON | ECHO);
+	tio.c_cc[VMIN] = 0;
+	tio.c_cc[VTIME] = 0;
+	if (tcsetattr(STDIN_FILENO, TCSANOW, &tio) != 0) {
+		return -1;
+	}
+	g_tio_active = 1;
+	return 0;
+}
+
+static void term_restore(void)
+{
+	if (g_tio_active) {
+		tcsetattr(STDIN_FILENO, TCSANOW, &g_tio_saved);
+		g_tio_active = 0;
+	}
 }
 
 /* ------------------------------------------------------------ display --- */
@@ -795,6 +909,9 @@ static void usage(const char *prog)
 "                    (default 2 below 512px, else 3; raise it to read further away)\n"
 "  --fullscreen      Scale the display to fill the panel (compositor does it,\n"
 "                    so it costs no per-frame CPU)\n"
+"  --snap-dir <path> Where the 's' key writes PNG snapshots  (default /dev/shm)\n"
+"                    Press 's' while running to save the frame as displayed;\n"
+"                    needs a terminal, so it is inert under a pipe or redirect\n"
 "  --help            This message\n"
 "\n"
 "Examples:\n"
@@ -823,6 +940,7 @@ int main(int argc, char **argv)
 	int probe_patch = 32;
 	int text_scale = 0;      /* 0 = pick from S in draw_probe_overlay() */
 	int fullscreen = 0;
+	const char *snap_dir = "/dev/shm";
 
 	static struct option opts[] = {
 		{ "model",       required_argument, 0, 'm' },
@@ -837,12 +955,13 @@ int main(int argc, char **argv)
 		{ "probe-patch", required_argument, 0, 'P' },
 		{ "text-scale",  required_argument, 0, 'T' },
 		{ "fullscreen",  no_argument,       0, 'F' },
+		{ "snap-dir",    required_argument, 0, 'S' },
 		{ "help",        no_argument,       0, 'h' },
 		{ 0, 0, 0, 0 }
 	};
 
 	for (;;) {
-		int c = getopt_long(argc, argv, "m:d:s:f:e:nphDCP:T:F", opts, NULL);
+		int c = getopt_long(argc, argv, "m:d:s:f:e:nphDCP:T:FS:", opts, NULL);
 		if (c == -1) {
 			break;
 		}
@@ -859,6 +978,7 @@ int main(int argc, char **argv)
 		case 'P': probe_patch = atoi(optarg); break;
 		case 'T': text_scale = atoi(optarg); break;
 		case 'F': fullscreen = 1; break;
+		case 'S': snap_dir = optarg; break;
 		case 'h': usage(argv[0]); return 0;
 		default: usage(argv[0]); return 2;
 		}
@@ -1080,6 +1200,16 @@ int main(int argc, char **argv)
 	float dmin = 0.0f, dmax = 0.0f;
 	float probe_m = 0.0f;
 	int ts_note_done = 0;
+	int snaps = 0;
+	/* Without a terminal there is no key to read, so the feature is simply
+	 * absent rather than an error -- bench runs pipe their output. */
+	int keys = (term_cbreak() == 0);
+	/* Registered rather than relying on the teardown path alone: a CHECK()
+	 * below returns straight out of main and would otherwise hand back a
+	 * terminal with echo off, which looks like a broken shell. */
+	if (keys) {
+		atexit(term_restore);
+	}
 
 	/* Allocated outside the loop like everything else the loop touches. */
 	float *probe_scratch = NULL;
@@ -1088,6 +1218,9 @@ int main(int argc, char **argv)
 	 * of it, which is the mistake the overlay exists to prevent. Not an error:
 	 * the readings are still valid, they just cannot be aimed by eye. */
 	int probe_overlay = probe_centre && disp && !depth_only;
+	if (keys) {
+		printf("snapshot         : press 's' to save a PNG into %s\n", snap_dir);
+	}
 	if (probe_centre) {
 		probe_scratch = malloc((size_t)probe_patch * probe_patch * sizeof(float));
 		CHECK(probe_scratch, "out of memory for the probe patch");
@@ -1185,6 +1318,52 @@ int main(int argc, char **argv)
 			}
 		}
 		double t5 = now_ms();
+
+		/* Snapshot on demand. Placed after the display write so the PNG is the
+		 * frame just shown, overlay and all, and deliberately outside the stage
+		 * timings: encoding costs ~135 ms and would otherwise pollute the very
+		 * latency figures this tool exists to report. */
+		if (keys && key_pending()) {
+			char key = 0;
+			if (read(STDIN_FILENO, &key, 1) == 1 && (key == 's' || key == 'S')) {
+				char path[512];
+				const uint8_t *frame;
+				int fw;
+
+				if (depth_only || !composite) {
+					frame = (const uint8_t *)bgra;
+					fw = S;
+				} else {
+					/* compose_side_by_side already ran for the display; when
+					 * headless it has not, so do it now. */
+					if (!disp) {
+						compose_side_by_side(rgb, crop_w, crop_h, bgra, S, composite);
+						if (probe_centre) {
+							draw_probe_overlay(composite, S, probe_patch, probe_m,
+							                   text_scale);
+						}
+					}
+					frame = (const uint8_t *)composite;
+					fw = 2 * S;
+				}
+				snprintf(path, sizeof(path), "%s/shot-%03d.png", snap_dir, ++snaps);
+				if (snapshot_png(frame, fw, S, path) == 0) {
+					if (probe_centre) {
+						printf("saved %s  (centre %.3f m)\n", path, probe_m);
+					} else {
+						printf("saved %s\n", path);
+					}
+				} else {
+					snaps--;
+				}
+				fflush(stdout);
+				/* Discount the encode from the run clock instead of resetting
+				 * the stats: end-to-end is derived from wall time since t_run0,
+				 * so shifting it forward by the stall keeps the FPS figure about
+				 * steady state without discarding the frames already measured. */
+				t_run0 += now_ms() - t5;
+			}
+		}
 
 		if (frames == 0) {
 			/* Frame 0 carries HVX/HMX power-on and the sink's first-buffer
@@ -1285,6 +1464,10 @@ int main(int argc, char **argv)
 	if (disp) {
 		pclose(disp);
 	}
+	/* Before any further output: a terminal left in cbreak mode looks broken to
+	 * whoever gets the shell back. Ctrl-C reaches here too, since the handler
+	 * only sets g_stop and the loop exits normally. */
+	term_restore();
 	cam_close(&cam);
 	qnn.contextFree(context, NULL);
 	qnn.backendFree(backend);
