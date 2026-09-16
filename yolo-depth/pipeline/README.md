@@ -105,6 +105,9 @@ cd /dev/shm
 | `--text-scale <N>` | auto | Pixel size of one font dot in the overlay reading (auto = 2 below 512px, else 3) |
 | `--fullscreen` | off | Scale the display to fill the panel |
 | `--snap-dir <path>` | `/dev/shm` | Where the `s` key writes PNG snapshots |
+| `--calibrate` | off | Apply the laser-fitted affine depth correction (see below) |
+| `--cal-a <f>` | 1.038 | Calibration slope |
+| `--cal-b <f>` | 0.357 | Calibration offset, metres |
 | `--help` | | Usage with an example |
 
 Exit code 0 on success, non-zero on failure.
@@ -202,6 +205,65 @@ plausible, wrong one. Encoding runs through GStreamer's `pngenc` (no libpng on
 the board) and costs ~135 ms, so it is excluded from the stage timings and the
 run clock is shifted to match; steady state stays 30.2 FPS. The key needs a
 terminal, so it is simply inert when stdout is piped or redirected.
+
+### Measured against a laser rangefinder (2026-09-16)
+
+384px model, 480x480 centre crop, one person standing in an office:
+
+| laser | raw | error | relative |
+|---|---|---|---|
+| 0.498 m | 0.82 m | +0.32 m | **+64.7%** |
+| 0.990 m | 1.32 m | +0.33 m | +33.3% |
+| 1.990 m | 2.61 m | +0.62 m | +31.2% |
+| 4.040 m | 4.48 m | +0.44 m | +10.9% |
+
+The relative error collapses from 65% to 11% while the absolute error stays near
++0.4 m, which is the signature of an **offset, not a scale error**:
+
+```
+raw = 1.038 * true + 0.357      R^2 = 0.994
+```
+
+The slope is within 4% of 1, so the scale is essentially right. Note this
+contradicts the obvious suspect — a pure scale factor from the head's
+`exp(cal_b) = 0.8238` would not fit (its residuals are 5x worse).
+
+`--calibrate` applies the inverse, leaving ±6 cm at three of the four points
+(+18 cm at 1.99 m). It is **off by default**, for two reasons that are not yet
+resolved:
+
+**1. Every point is the same target.** One person, one pose, one room. A
+monocular net infers depth from learned priors about apparent size and
+occlusion, so the offset may be a property of *"a person indoors"* rather than
+of the camera. This data fits that hypothesis exactly as well as it fits a
+systematic camera offset and cannot distinguish them. The depth pane in
+`shot-004.png` shows the person segmented cleanly from the wall behind, which is
+a reason to suspect the net treats people as their own class.
+
+**To settle it**, repeat the sweep against a flat wall and a cardboard box. If
+all three targets offset by +0.3–0.4 m it is systematic and the correction is
+sound; if the wall offsets by +0.1 m and the person by +0.36 m, this whole
+approach fails and per-object calibration is not viable.
+
+**2. Nothing was measured closer than 0.498 m** — where the relative error is
+already twice that of any other point. A four-point line extrapolated below its
+measured range has no basis, and the correction goes to zero for raw < 0.357 m
+(raw 0.40 m corrects to an absurd 0.04 m). **Near-field is exactly where
+obstacle avoidance needs accuracy most**, and an uncalibrated 0.5 m obstacle
+reads as 0.82 m — 32 cm of clearance that is not there, in the dangerous
+direction. Readings below 0.45 m are flagged `BELOW FITTED RANGE` rather than
+silently trusted.
+
+Both raw and corrected values are always printed together, so a reading is never
+silently transformed:
+
+```
+[    2] centre  0.928 m  (raw  1.320, frame age 33.06 ms)
+```
+
+The constants are specific to this resolution, crop and camera — monocular
+metric depth is conditioned on focal-length-in-pixels. Override with `--cal-a`
+and `--cal-b` after re-measuring; do not carry these numbers to another setup.
 
 ### Viewing the snapshots on the board
 

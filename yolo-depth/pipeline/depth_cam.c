@@ -668,6 +668,58 @@ static void draw_probe_overlay(uint32_t *composite, int S, int patch, float metr
 	draw_text(composite, W, S, S + tx, ty, sc, label, white, black);
 }
 
+/* --------------------------------------------------------- calibration --- */
+
+/*
+ * Affine correction of the net's metric output: true = (raw - b) / a.
+ *
+ * Measured 2026-09-16 against a laser rangefinder, 384px model, 480x480 centre
+ * crop, one person standing in an office:
+ *
+ *     laser   raw     error
+ *     0.498   0.82   +0.32 m   (+64.7%)
+ *     0.990   1.32   +0.33 m   (+33.3%)
+ *     1.990   2.61   +0.62 m   (+31.2%)
+ *     4.040   4.48   +0.44 m   (+10.9%)
+ *
+ * Fit: raw = 1.038 * true + 0.357, R^2 = 0.994. The slope is within 4% of 1,
+ * so the scale is essentially right and the error is a near-constant offset --
+ * NOT the pure scale factor exp(cal_b) = 0.8238 in the ONNX head would predict.
+ * Applying it leaves +-6 cm at three of the four points (+18 cm at 1.99 m).
+ *
+ * TWO REASONS THIS IS NOT YET TRUSTWORTHY, both unresolved:
+ *
+ * 1. Every point is the same target -- one person, one pose, one room. A
+ *    monocular net infers depth from learned priors about apparent size and
+ *    occlusion, so the offset may be a property of "a person indoors" rather
+ *    than of the camera. The data fits that hypothesis exactly as well as it
+ *    fits a systematic camera offset, and cannot separate them. Repeating the
+ *    sweep against a wall and a cardboard box is what would settle it; until
+ *    then this correction is only known to hold for people.
+ *
+ * 2. Nothing was measured closer than 0.498 m, where the relative error is
+ *    already twice that of any other point. Extrapolating a four-point line
+ *    below the measured range has no basis, and the correction turns negative
+ *    for raw < 0.357 m. Near-field is exactly where obstacle avoidance needs
+ *    accuracy most, so it is clamped rather than extrapolated, and the clamp
+ *    is reported instead of being silently applied.
+ *
+ * Off by default for those reasons. The numbers are also specific to this
+ * resolution, crop and camera: monocular metric depth is conditioned on
+ * focal-length-in-pixels, so changing any of them invalidates the fit.
+ */
+#define CAL_A 1.038f
+#define CAL_B 0.357f
+
+/* Below this the fit is pure extrapolation; readings are flagged, not trusted. */
+#define CAL_MIN_VALID_M 0.45f
+
+static float depth_calibrate(float raw, float a, float b)
+{
+	float t = (raw - b) / a;
+	return t > 0.0f ? t : 0.0f;
+}
+
 /* ----------------------------------------------------------- snapshot --- */
 
 /*
@@ -909,6 +961,12 @@ static void usage(const char *prog)
 "                    (default 2 below 512px, else 3; raise it to read further away)\n"
 "  --fullscreen      Scale the display to fill the panel (compositor does it,\n"
 "                    so it costs no per-frame CPU)\n"
+"  --calibrate       Apply the affine depth correction measured against a laser\n"
+"                    (true = (raw - b) / a). OFF by default: see the note in\n"
+"                    the source -- it was fitted on ONE target type and has no\n"
+"                    data below 0.45 m\n"
+"  --cal-a <f>       Calibration slope       (default 1.038)\n"
+"  --cal-b <f>       Calibration offset in m (default 0.357)\n"
 "  --snap-dir <path> Where the 's' key writes PNG snapshots  (default /dev/shm)\n"
 "                    Press 's' while running to save the frame as displayed;\n"
 "                    needs a terminal, so it is inert under a pipe or redirect\n"
@@ -941,6 +999,9 @@ int main(int argc, char **argv)
 	int text_scale = 0;      /* 0 = pick from S in draw_probe_overlay() */
 	int fullscreen = 0;
 	const char *snap_dir = "/dev/shm";
+	int calibrate = 0;
+	float cal_a = CAL_A;
+	float cal_b = CAL_B;
 
 	static struct option opts[] = {
 		{ "model",       required_argument, 0, 'm' },
@@ -956,12 +1017,15 @@ int main(int argc, char **argv)
 		{ "text-scale",  required_argument, 0, 'T' },
 		{ "fullscreen",  no_argument,       0, 'F' },
 		{ "snap-dir",    required_argument, 0, 'S' },
+		{ "calibrate",   no_argument,       0, 'c' },
+		{ "cal-a",       required_argument, 0, 'A' },
+		{ "cal-b",       required_argument, 0, 'B' },
 		{ "help",        no_argument,       0, 'h' },
 		{ 0, 0, 0, 0 }
 	};
 
 	for (;;) {
-		int c = getopt_long(argc, argv, "m:d:s:f:e:nphDCP:T:FS:", opts, NULL);
+		int c = getopt_long(argc, argv, "m:d:s:f:e:nphDCP:T:FS:cA:B:", opts, NULL);
 		if (c == -1) {
 			break;
 		}
@@ -979,6 +1043,9 @@ int main(int argc, char **argv)
 		case 'T': text_scale = atoi(optarg); break;
 		case 'F': fullscreen = 1; break;
 		case 'S': snap_dir = optarg; break;
+		case 'c': calibrate = 1; break;
+		case 'A': cal_a = (float)atof(optarg); break;
+		case 'B': cal_b = (float)atof(optarg); break;
 		case 'h': usage(argv[0]); return 0;
 		default: usage(argv[0]); return 2;
 		}
@@ -1199,6 +1266,7 @@ int main(int argc, char **argv)
 	int rc = 0;
 	float dmin = 0.0f, dmax = 0.0f;
 	float probe_m = 0.0f;
+	float probe_raw = 0.0f;
 	int ts_note_done = 0;
 	int snaps = 0;
 	/* Without a terminal there is no key to read, so the feature is simply
@@ -1220,6 +1288,13 @@ int main(int argc, char **argv)
 	int probe_overlay = probe_centre && disp && !depth_only;
 	if (keys) {
 		printf("snapshot         : press 's' to save a PNG into %s\n", snap_dir);
+	}
+	if (calibrate) {
+		printf("calibration      : true = (raw - %.3f) / %.3f\n", cal_b, cal_a);
+		printf("NOTE: fitted on ONE target type (a person) over 0.50-4.04 m.\n");
+		printf("      Unverified for other objects, and below %.2f m it is\n",
+		       CAL_MIN_VALID_M);
+		printf("      extrapolation -- readings there are flagged.\n");
 	}
 	if (probe_centre) {
 		probe_scratch = malloc((size_t)probe_patch * probe_patch * sizeof(float));
@@ -1290,7 +1365,9 @@ int main(int argc, char **argv)
 		double t3 = now_ms();
 
 		if (probe_centre) {
-			probe_m = centre_depth_median(net_out, S, probe_patch, probe_scratch);
+			probe_raw = centre_depth_median(net_out, S, probe_patch, probe_scratch);
+			probe_m = calibrate ? depth_calibrate(probe_raw, cal_a, cal_b)
+			                    : probe_raw;
 		}
 
 		colourize(net_out, S, lut, bgra, &dmin, &dmax);
@@ -1349,7 +1426,12 @@ int main(int argc, char **argv)
 				snprintf(path, sizeof(path), "%s/shot-%03d.png", snap_dir, ++snaps);
 				if (snapshot_png(frame, fw, S, path) == 0) {
 					if (probe_centre) {
-						printf("saved %s  (centre %.3f m)\n", path, probe_m);
+						if (calibrate) {
+							printf("saved %s  (centre %.3f m, raw %.3f)\n",
+							       path, probe_m, probe_raw);
+						} else {
+							printf("saved %s  (centre %.3f m)\n", path, probe_m);
+						}
 					} else {
 						printf("saved %s\n", path);
 					}
@@ -1388,8 +1470,15 @@ int main(int argc, char **argv)
 		 * With the overlay up, the screen is the readout and printing every
 		 * frame would only add blocking writes to the latency being measured. */
 		if (probe_centre && !probe_overlay) {
-			printf("[%5d] centre %6.3f m  (frame age %5.2f ms)\n",
-			       frames, probe_m, age);
+			if (calibrate) {
+				printf("[%5d] centre %6.3f m  (raw %6.3f%s, frame age %5.2f ms)\n",
+				       frames, probe_m, probe_raw,
+				       probe_raw < CAL_MIN_VALID_M ? " BELOW FITTED RANGE" : "",
+				       age);
+			} else {
+				printf("[%5d] centre %6.3f m  (frame age %5.2f ms)\n",
+				       frames, probe_m, age);
+			}
 			fflush(stdout);
 		} else if (st.n > 0 && frames % stats_every == 0) {
 			double e2e = (now_ms() - t_run0) / st.n;
