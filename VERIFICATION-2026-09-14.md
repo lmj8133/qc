@@ -29,6 +29,7 @@
 | 10 | 板載 Camera ×5 | MIPI camera preview | ⚠️ 未測 | 板上無 module；且 DT sensor 型號與文件不符 |
 | 11 | USB Camera | UVC 擷取與 HDMI 預覽 | ✅ | AVerMedia PW310P；反證影像鏈路正常 |
 | 15 | 開機行為 | 上電後為何不自己開機 | ⚠️ 設計行為 | **需插 USB 觸發 PON**；非故障，見 §15 |
+| 16 | WiFi（station） | `wlan0` 掃描、關聯、DHCP | ✅ | 混合模式 AP 須釘 `key_mgmt=WPA-PSK`；公司 AP 不發 DHCP（AP 端問題） |
 
 **環境**
 
@@ -38,15 +39,15 @@
 | kernel | `5.15.170-qki-consolidate-android13-8-00002-g576728c775df-dirty` |
 | adb product | `kalama-qti-distro-ubuntu-fullstack-debug` |
 | 音訊 | card `pal.audio.primary`；sink `low-latency0` / `offload0`；source `regular0` |
-| 網路 | eth0 `192.168.3.63/24`（DHCP）；wlan0 為 DOWN |
+| 網路 | eth0 `192.168.3.63/24`（DHCP，現為 `.67`）；wlan0 驅動正常、可掃描（見 §16） |
 
-> ⚠️ **本文件內的 `192.168.3.63` 是撰寫當下的 IP，現已變更為 `192.168.3.80`。**
+> ⚠️ **本文件內的 `192.168.3.63` 是撰寫當下的 IP，現為 `192.168.3.67`（已變動三次）。**
 > IP 由 DHCP 配發會變動（見 §7）。直接複製本文件的指令會連不上 —— 先確認當前 IP，
 > 或改用 `yolo-depth/pipeline/run.sh`（預設已指向現行位址，可用 `BOARD=<ip>` 覆寫）。
 
 **未完成**（詳見 §12）：Camera、麥克風、AI — 前兩項待硬體到貨，AI 缺模型檔。
 
-**應回報文件維護者**（詳見 §13）：§6 音訊環境變數（高）、§7 SSH 密碼登入（高）、§10 sensor 型號不符（中）、§8 SDK README 兩處（低）、燒錄耗時差異（低）。
+**應回報文件維護者**（詳見 §13）：§6 音訊環境變數（高）、§7 SSH 密碼登入（高）、§10 sensor 型號不符（中）、§8 SDK README 兩處（低）、§16 regulatory domain 不可由 userspace 更正（低）、燒錄耗時差異（低）。
 
 ---
 
@@ -827,6 +828,9 @@ gst-launch-1.0 v4l2src device=/dev/video2 ! \
 - [ ] 麥克風：待硬體到貨，以 `qtitinymix` 測 AMIC1/2、DMIC1/2/3、headset mic（指令見 Release Notes）
 - [ ] AI（TensorFlow Lite）— 工具已預裝（`label_image`、`benchmark_model`、`libtensorflowlite_c.so`），但**板上無 `.tflite` 模型檔**，需先取得模型與 BMP 測試圖。端到端 pipeline（`gst-tflite-*-example`）現可改用 §11 的 USB camera 作為輸入源
 - [x] ~~Application SDK 解壓與交叉編譯環境~~ — 已完成，見 §8
+- [x] ~~WiFi（station 模式）~~ — 已完成，見 §16。板子 WiFi 完整可用（手機熱點可取得 IPv4）
+- [ ] 公司 `Algoltek` 的 DHCP 不發位址 —— **待網管查**（板端已證無誤，§16）。
+      板子 wlan0 MAC `00:03:7f:12:fc:c8`；疑 MAC 白名單 / pool 用盡 / VLAN relay
 
 ---
 
@@ -839,6 +843,7 @@ gst-launch-1.0 v4l2src device=/dev/video2 ! \
 | 3 | §10 device tree 的 sensor 型號（Samsung）與文件（Sony IMX）不符 | **中** — 裝上模組後才會發現 |
 | 4 | §8 SDK README：宣稱自帶編譯器（實際用系統的）、環境設定檔名寫成 `armv8a`（實際 `aarch64`） | **低** — 易誤判環境設定失敗 |
 | 5 | 燒錄耗時 1m10s vs SOP 的 11m35s | **低** — 資訊性 |
+| 6 | regulatory domain 固定為 `country 00`（world），板上無 `/etc/default/crda`，且 `iw reg set` 不生效 | **低** — 本次未造成實際障礙，但 5 GHz 多數頻道標 `no IR`，且無法由 userspace 更正 |
 
 第 5 項說明：吞吐量實測 122–255 MB/s（61 筆取樣），SOP 記載 25.8–32.8 MB/s。本次板子列舉於 USB 3.0 root hub（`Bus 002`，`1d6b:0003`），SOP 的數值屬 USB 2.0 區間。結果正確（0 錯誤、log 行數吻合、kernel hash 吻合）。建議 SOP 加註時間隨 USB 2.0/3.0 而異，避免後續操作者因「太快」而誤判未燒完。
 
@@ -913,3 +918,240 @@ rtc-pm8xxx ... setting system clock to 1970-01-01T00:00:05 UTC
 每次開機系統時間都歸零到 1970，需靠 NTP 或手動校時。副作用是
 `journalctl --list-boots` 只認得到本次 boot，**歷史開機紀錄無法回溯** ——
 要查前幾次開機原因，只能靠上面的 `pmic_pon` log。
+
+---
+
+## 16. WiFi（station 模式）
+
+**驗什麼**：`wlan0` 可掃描並連上一般 AP，取得 DHCP 位址，成為 SSH 與 pipeline 的傳輸通道。
+
+驗證時機為 2026-09-16，動機是板子要移至實驗室，可能無有線網路。
+
+### 先知道這兩件事
+
+**1. 板上沒有 NetworkManager，也沒有 connman，`systemd-networkd` 是 masked。**
+`nmcli` / `connmanctl` 那套完全不存在，只有 `wpa_supplicant` + `dhcpcd` 的手動路徑。
+
+```bash
+command -v nmcli connmanctl             # 皆無
+systemctl is-enabled systemd-networkd   # masked
+systemctl is-active dhcpcd              # active（已在跑，不要另起第二個實例）
+```
+
+**2. ⚠️ `qcmap_wpa_supplicant@.service` 不是你要的東西。**
+板上這兩個 unit 屬 Qualcomm QCMAP 的 AP/router 框架，其
+`EnvironmentFile=/var/run/data/wpa_supplicant_options.conf` 需由 QCMAP daemon 產生。
+拿它來連 AP 是繞遠路，直接用標準 `wpa_supplicant` 反而乾淨。
+
+### 腳本位置與用法
+
+`wifi-setup.sh` 已安裝於板上兩處，皆**重開機存活**：
+
+| 路徑 | 說明 |
+|---|---|
+| `/usr/local/bin/wifi-setup.sh` | 在 `PATH` 內 —— 任何目錄直接打 `wifi-setup.sh` |
+| `/root/wifi-setup.sh` | 備份；UART 登入後即在家目錄 |
+
+**必須以 root 執行**（腳本會自行檢查）。
+
+| 呼叫方式 | 作用 |
+|---|---|
+| `wifi-setup.sh --scan` | 列出可見的 AP，含 SSID、訊號強度、頻率 |
+| `wifi-setup.sh --status` | 目前關聯狀態與 IPv4 位址 |
+| `wifi-setup.sh <SSID> <密碼>` | 連線，成功後印出取得的 IP |
+
+密碼含特殊字元時用單引號包起來；長度需 ≥ 8（WPA 規格）。
+連線成功會印出 IP 與可直接複製的 `BOARD=<ip> ./run.sh` 提示。
+
+**連線不會在重開機後保留**，重開後再跑一次同樣的指令即可。
+腳本刻意不提供「開機自動連」——公司 AP 就是會關聯成功卻不發 lease 的例子，
+把它固化進開機流程只會讓每次失敗重試灌滿 UART console。真要開機自動連，
+自己寫一個 systemd unit 比較清楚。
+
+搬機後的典型流程（UART 登入，`/dev/ttyUSB0`、115200/8N1、`root` / `oelinux123`）：
+
+```bash
+wifi-setup.sh --scan                 # 先看現地有什麼、訊號多強
+wifi-setup.sh 'Algoltek' '<密碼>'     # 連線
+wifi-setup.sh --status               # 確認真的拿到 inet 位址
+```
+
+版控來源為 `yolo-depth/pipeline/wifi-setup.sh`，修改後需重新推送：
+
+```bash
+scp yolo-depth/pipeline/wifi-setup.sh root@<board>:/usr/local/bin/
+ssh root@<board> 'chmod +x /usr/local/bin/wifi-setup.sh; sync'
+```
+
+### 怎麼驗
+
+**1. 確認硬體與 radio 未被封鎖**
+
+```bash
+ip -br link show wlan0                      # 應存在（初始為 DOWN / NO-CARRIER）
+rfkill list                                 # phy0 的 Soft/Hard blocked 皆應為 no
+ls -l /sys/class/net/wlan0/device/driver    # 應指向 cnss_pci
+lsmod | grep -iE "kiwi|cnss"                # kiwi_v2 + cnss2 等
+dmesg | grep -i kiwi                        # 驅動版本
+```
+
+> ⚠️ `rfkill list` 會顯示 **`bt_power: Bluetooth  Soft blocked: yes`** ——
+> 那是藍牙，與 WiFi 無關。要看的是 `phy0: Wireless LAN` 那一項。
+
+**2. 掃描**
+
+```bash
+wifi-setup.sh --scan
+```
+
+等價的手動指令：
+
+```bash
+ip link set wlan0 up
+sleep 2
+iw dev wlan0 scan | grep -E "^BSS|SSID:|signal:|freq:"
+```
+
+**3. 連線**
+
+> ⚠️ 建議走 **UART**，或一條不會被這步影響的連線。腳本會啟動 `wpa_supplicant`
+> 並要求 `dhcpcd` 為 `wlan0` 續約；若失敗，UART 是唯一保證看得到錯誤的通道。
+
+```bash
+wifi-setup.sh 'Algoltek' '<密碼>'
+```
+
+等價的手動流程（腳本做的就是這些）：
+
+```bash
+rfkill unblock wifi
+
+mkdir -p /etc/wpa_supplicant
+{
+  echo "ctrl_interface=/var/run/wpa_supplicant"
+  echo "update_config=1"
+  # awk inserts a REAL tab; sed's 'i\\t' would write a literal backslash-t
+  wpa_passphrase '<SSID>' '<密碼>' | grep -v '^\s*#psk=' |
+    awk '/^}/{print "\tkey_mgmt=WPA-PSK"} {print}'
+} > /etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+chmod 600 /etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+
+ip link set wlan0 up
+wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant/wpa_supplicant-wlan0.conf -D nl80211
+
+iw dev wlan0 link                 # 應出現 "Connected to <BSSID>"
+dhcpcd -n wlan0                   # -n = 向既有 daemon 要求 renew，不另起實例
+ip -4 addr show wlan0
+```
+
+`wpa_passphrase` 會把密碼雜湊後寫入，明文不落地（`grep -v` 濾掉它附帶的明文註解行）。
+**`key_mgmt=WPA-PSK` 那一行不可省** —— 理由見下一節。
+
+### 結果
+
+| 項目 | 結果 |
+|---|---|
+| 介面 | ✅ `wlan0`（MAC `00:03:7f:12:fc:c8`） |
+| 驅動 | ✅ `kiwi_v2` v5.2.1.71G + `cnss_pci`（QCA6xxx 系列，PCIe） |
+| rfkill | ✅ `phy0` 未封鎖（soft / hard 皆 no） |
+| 介面模式 | ✅ `managed`、`AP`、`monitor`、`P2P-client`、`P2P-GO`、`NAN` |
+| 頻段 | ✅ 2.4 GHz、5 GHz，**並含 6 GHz（最高 7115 MHz，即 WiFi 6E）** |
+| 掃描 | ✅ 掃到 `Algoltek`（2437 / 5240 MHz）、`820064`、`ASUS_JPX` |
+| 關聯（WPA2） | ✅ 一次成功，須釘 `key_mgmt=WPA-PSK`（見下） |
+| 鏈路品質 | ✅ -79 dBm、**WiFi 6 (HE-MCS 11)、2 空間流、40 MHz、rx 573 Mbps** |
+| DHCP（手機熱點） | ✅ 取得 IPv4，**證明整條路徑可用** |
+| DHCP（公司 `Algoltek`） | ❌ 拿不到位址 —— **AP 端問題，非板子**（見下） |
+
+**板子的 WiFi 完整可用。** 射頻、驅動、firmware、天線、WPA2 認證、DHCP 用戶端
+全部驗證通過 —— 連上手機熱點即可取得 IPv4。
+
+### ⚠️ 混合模式 AP 必須釘 `key_mgmt` —— 否則 auth 無限重試
+
+**這是本次唯一真正的板端問題，已修正。**
+
+`Algoltek` 的 5 GHz BSS 通告：
+
+```
+* Authentication suites: PSK SAE          ← WPA2/WPA3 混合模式
+* Capabilities: ... MFP-capable (0x0080)
+```
+
+`wpa_passphrase` 產生的 config **不含 `key_mgmt`**，交由 `wpa_supplicant` 自行協商。
+在混合模式下這會失敗，`kiwi_v2` 的症狀是無限重試：
+
+```
+kiwi_v2: [E:PE] lim_process_mlm_auth_cnf: Auth Failure occurred
+kiwi_v2: [E:PE] lim_process_mlm_assoc_cnf: Association failure resultCode: 510
+```
+
+**修正**:config 需明確指定，`wifi-setup.sh` 已會自動偵測並寫入 ——
+
+```
+key_mgmt=WPA-PSK
+ieee80211w=1          # MFP optional，不可用 =2 (required)
+```
+
+釘上之後**一次關聯成功**，並協商出 WiFi 6 / 2 空間流 / 573 Mbps。
+
+> ⚠️ **`resultCode: 510` 不是密碼錯。** 腳本原本的錯誤訊息寫「wrong passphrase，
+> or out of range」，誤導了整個排查方向。認證階段失敗要先看 AP 的 auth suite，
+> 不要先懷疑密碼或訊號。
+
+### DHCP 拿不到位址時，先確認是哪一端
+
+`Algoltek` 上關聯成功但拿不到 IPv4。**用 `tcpdump` 就能一刀切開兩種可能**：
+
+```bash
+timeout 45 tcpdump -i wlan0 -n -c 20 "port 67 or port 68" &
+dhcpcd -n wlan0
+```
+
+實測結果：
+
+```
+IP 0.0.0.0.68 > 255.255.255.255.67: BOOTP/DHCP, Request from 00:03:7f:12:fc:c8
+（共 6 個 Request 送出，零 OFFER 回應，0 packets dropped by kernel）
+```
+
+**板子把 DISCOVER 正常送出，AP 端完全沒回應** —— 所以是 AP / DHCP server 的問題。
+同一支板子連**手機熱點**可正常取得 IPv4，反證板端無誤。
+
+板子的 wlan0 MAC 為 **`00:03:7f:12:fc:c8`**，向網管查詢時用得上。AP 端常見原因：
+MAC 白名單、DHCP pool 用盡(該 BSS 的 `station count` 達 40)、無線段 VLAN 的
+DHCP relay 設定。
+
+> ⚠️ **「有線正常」不能證明 DHCP 廣播路徑正常。** `dhcpcd` 的 journal 顯示
+> `eth0` 一直是 `rebinding lease`（有 `/var/lib/dhcpcd/eth0.lease`），走的是續約;
+> `wlan0` 無 lease 檔，必須跑完整 DISCOVER → OFFER。兩者程式路徑不同。
+
+### 備註：regulatory domain 為 `country 00`
+
+```bash
+iw reg get        # global / country 00: DFS-UNSET
+```
+
+2.4 GHz 的 ch 12/13/14 為 disabled,5 GHz 多數頻道標 `no IR`。
+板上無 `/etc/default/crda`，且**實測 `iw reg set TW` 不生效**（設定後仍為
+`country 00`，driver 可能是 self-managed regulatory）。
+
+**與上述任何問題皆無因果關係** —— 記錄於此僅為留存觀察。`Algoltek` 實際使用的
+2437 MHz（ch 6）與 5240 MHz（ch 48）在 `country 00` 下皆完全啟用、無 `no IR` 限制。
+
+### 問題與解法
+
+| 症狀 | 原因 | 解法 |
+|---|---|---|
+| `rfkill list` 顯示 Soft blocked: yes | 看錯項目（那是 `bt_power`，藍牙） | 只看 `phy0: Wireless LAN` |
+| `nmcli: command not found` | 板上無 NetworkManager | 用 `wifi-setup.sh`，或上面的手動流程 |
+| 掃描結果為空 | `wlan0` 仍 DOWN，或 up 後未及收斂 | `ip link set wlan0 up` 後 `sleep 2` 再掃 |
+| 關聯成功但無 IP | `dhcpcd` 未對該介面續約 | `dhcpcd -n wlan0`；勿另起第二個 daemon |
+| `Auth Failure` / `resultCode: 510` | AP 為 `PSK SAE` 混合模式，`key_mgmt` 未釘 | 已由腳本自動處理;手動設 `key_mgmt=WPA-PSK` |
+| 關聯成功但無 IPv4 | 多為 AP 端不發位址 | 用上面的 `tcpdump` 確認是哪一端;板端無誤則找網管 |
+| 連上 WiFi 後 SSH 連不上 | IP 換了網段（見 §7） | 板子端 `wifi-setup.sh --status` 查 IP；或 UART 問 |
+
+> **掃描讀值不代表關聯後的鏈路品質。** 被動掃描時各 AP 皆為 -81 ~ -86 dBm，
+> 但實際關聯後為 -79 dBm 並協商出 573 Mbps。不要用掃描的 dBm 判斷連不上的原因。
+
+> **WiFi 連上後 IP 必定再變，且會是不同網段。**
+> `yolo-depth/pipeline/board.env` 是 `build.sh` / `run.sh` 共用的預設值，改一行即可；
+> 或 `BOARD=<ip> ./run.sh`。§7 記錄了 ARP 快取會誤導的陷阱。

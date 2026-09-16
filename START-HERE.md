@@ -263,6 +263,38 @@ ssh root@192.168.3.67 'pkill -x depth_cam; pkill -f gst-launch-1.0'
 **順序：先接 12V，再接 Type-C。** 插上 USB 仍無反應時，才需要懷疑硬體。
 詳見 `VERIFICATION §15`。
 
+### 要搬到沒有網路線的地方 —— WiFi
+
+腳本已預裝在板上，**重開機存活、在 `PATH` 內**，所以斷電搬運後
+UART 登入就能直接用（`/dev/ttyUSB0`、115200/8N1、`root` / `oelinux123`）：
+
+```bash
+wifi-setup.sh --scan                 # 看現地有什麼、訊號多強
+wifi-setup.sh '<SSID>' '<密碼>'       # 連線（重開機後需再跑一次）
+wifi-setup.sh --status               # 確認真的拿到 inet 位址
+```
+
+| Option | 作用 |
+|---|---|
+| `--scan` | 列出可見 AP，含 SSID、訊號、頻率 |
+| `--status` | 目前關聯狀態與 IP |
+| `<SSID> <密碼>` | 連線，印出取得的 IP |
+
+腳本在板上的 `/usr/local/bin/wifi-setup.sh`（`PATH` 內）與 `/root/wifi-setup.sh`；
+版控來源 `yolo-depth/pipeline/wifi-setup.sh`，改了要自己 `scp` 回 `/usr/local/bin/`。
+
+板上**沒有 NetworkManager**（`nmcli` 不存在），走 `wpa_supplicant` + `dhcpcd`。
+
+> ⚠️ **WPA2/WPA3 混合模式的 AP（`Authentication suites: PSK SAE`）必須釘
+> `key_mgmt=WPA-PSK`**，否則會無限 `Auth Failure` / `resultCode: 510`。
+> 腳本已自動處理；手寫 config 時不可省。**那個錯誤不是密碼錯。**
+
+WiFi 本身已完整驗證（關聯、WiFi 6 / 573 Mbps、熱點可取得 IPv4）。
+公司 `Algoltek` 關聯成功但不發 DHCP —— 已用 `tcpdump` 證實是 AP 端不回應，
+板端無誤（wlan0 MAC `00:03:7f:12:fc:c8`，待網管查）。
+
+完整步驟、`rfkill` 看錯項目的陷阱、DHCP 兩端如何切分，見 `VERIFICATION §16`。
+
 ### IP 是 DHCP，會變動
 
 IP 已變動三次：`192.168.3.63` → `.80` → `.67`（2026-09-16）。
