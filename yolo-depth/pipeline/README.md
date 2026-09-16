@@ -80,9 +80,101 @@ cd /dev/shm
 | `--stats-every <N>` | 30 | Frames between stats lines |
 | `--no-display` | off | Headless benchmark |
 | `--no-pin` | off | Disable CPU pinning (see below) |
+| `--probe-centre` | off | Per-frame median metric depth of a centre patch (see below) |
+| `--probe-patch <N>` | 32 | Side of that patch, in model pixels; clamped to the model input |
 | `--help` | | Usage with an example |
 
 Exit code 0 on success, non-zero on failure.
+
+## Latency and absolute scale — the two obstacle-avoidance measurements
+
+The platform is ultimately for obstacle avoidance, where the metric that matters
+is glass-to-decision latency in metres of real distance, not FPS. The stage
+timings above answer neither question, so two measurements exist separately.
+
+### Frame age at dequeue (always reported)
+
+The V4L2 buffer timestamp is on `CLOCK_MONOTONIC`, the same clock `now_ms()`
+reads, so subtracting it from the dequeue time gives the age of the frame when
+the loop first saw it: sensor readout, the camera's own ISP, USB transfer and
+driver buffering. The program prints the driver's timestamp convention once at
+startup rather than assuming it:
+
+```
+buffer timestamp : monotonic, start-of-exposure
+```
+
+**Measured at 384px: 34.23 ms mean (min 32.52, max 37.27).** That is about one
+frame period at 30 fps, and it is a fixed cost of the sensor, not a transfer
+cost — cutting the USB payload four-fold (640x480 -> 320x240 YUYV) moves it by
+about 1%, in the wrong direction. Only a higher-frame-rate sensor shortens it.
+
+**Frame age overlaps `capture`, it does not add to it.** `capture` times a
+dequeue of a buffer that was usually already waiting, which is why it reads
+~0.04 ms whenever the pipeline is slower than the camera. Do not sum the two.
+The summary reports them apart for this reason:
+
+```
+frame age at dq  :  34.23 ms   (min 32.52, max 37.27; ...)
+glass-to-display :  51.35 ms   (frame age + preprocess + inference + ...)
+```
+
+### `--probe-centre` — checking the metric scale against a tape measure
+
+The network's output is metric metres: the head is `Conv -> Clip(-4,5) -> Exp ->
+Pow(cal_a) -> Mul(exp(cal_b))`, an exponential metric head, and `colourize()`'s
+per-frame min/max normalization only ever writes the BGRA copy — `net_out` is
+never rescaled. So the fp16 values are metres and can be compared with a ruler.
+
+What has *not* been established is how accurate those metres are. The 0.9997
+correlation quoted elsewhere is FP16 conversion error against the same-size ONNX
+reference, not absolute depth accuracy, and NYU val has never been run. Two
+specific reasons to expect a bias: the centre crop from 640x480 to 480x480
+changes focal-length-in-pixels, which is exactly what monocular metric depth is
+conditioned on; and the shipped calibration constants are not identity
+(`cal_a = 1.0` but `exp(cal_b) = 0.8237834`).
+
+```bash
+./run.sh 384 live --probe-centre        # with the aiming overlay
+```
+
+Aim the centre of frame at a flat surface, put a tape measure on it, and read
+the metre value at 0.5 / 1 / 2 / 4 m. Use four distances rather than one: it
+tells you whether the error is an offset, a scale factor or non-linear. A pure
+scale factor may be one constant away from being correct.
+
+**With the side-by-side display**, a green box marks the patch on both panes and
+the reading is drawn next to it, so you aim and read on the screen without
+looking away at an SSH terminal. Both panes are boxed because they answer
+different questions: the camera pane shows which real object the box is on, and
+the depth pane shows whether that region is one flat surface or straddles a
+depth discontinuity. A 32x32 patch is 8.3% of the frame's width at 384px, so a
+small aiming error can put it on a doorframe or the floor instead of the wall —
+and the reading will still look stable and plausible. That is the mistake the
+overlay exists to prevent, and it is why the reading is only trustworthy when
+you can see where the box landed.
+
+The glyphs come from a 3x5 bitmap font built into the program; the board has no
+font reachable from a plain C program.
+
+**Headless or `--depth-only`** prints a reading every frame instead, since a
+tape measure will not hold still for `--stats-every` frames:
+
+```
+[    2] centre  5.930 m  (frame age 33.31 ms)
+```
+
+There is deliberately no overlay in `--depth-only`: on a bare turbo-coloured
+depth map there is no way to tell a wall from a chair in front of it, so a box
+there would invite exactly the error above. The program says so once and carries
+on — the readings are still valid, they just cannot be aimed by eye.
+
+Note that the display costs ~8 ms of producer-blocking time, so the latency
+figures printed while the overlay is up are not the shipping config's. The depth
+readings are unaffected: they come from the same `net_out` either way.
+
+The patch is a median, not a mean, so a few stray pixels at a depth
+discontinuity do not drag the reading off the surface being measured.
 
 ## Measured performance — 640x640 model, 300 frames
 

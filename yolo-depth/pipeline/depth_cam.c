@@ -13,6 +13,13 @@
  *   - Everything the per-frame loop touches is allocated up front. The loop
  *     performs zero malloc/free.
  *
+ * Two measurements exist for the sake of obstacle avoidance, where the metric
+ * that matters is glass-to-decision latency and absolute metres, not FPS:
+ *   - Frame age at dequeue, reported always. The stage timings cannot see it:
+ *     "capture" times a dequeue of a buffer that was already waiting.
+ *   - --probe-centre, the median metric depth of a centre patch, for checking
+ *     the net's absolute scale against a tape measure.
+ *
  * Build (natively, on the board):
  *   gcc -O3 -march=armv8.2-a+fp16 -o depth_cam depth_cam.c \
  *       -I/opt/qcom/qirp-sdk/include -ldl -lm
@@ -468,6 +475,163 @@ static void compose_side_by_side(const uint8_t *rgb, int crop_w, int crop_h,
 	}
 }
 
+/* ------------------------------------------------- probe overlay --------- */
+
+/*
+ * A 3x5 bitmap font, just the glyphs a depth reading needs: "0123456789.m".
+ * The board has no font of any kind reachable from a plain C program, and the
+ * alternative -- reading the number off an SSH terminal while holding a tape
+ * measure against a wall -- is how you end up trusting a patch that was
+ * actually aimed at the floor. Each byte is one row, bit 2 is the leftmost
+ * pixel, so 0b101 is two dots with a gap.
+ */
+#define GLYPH_W 3
+#define GLYPH_H 5
+
+static const uint8_t font3x5[12][GLYPH_H] = {
+	{ 0x7, 0x5, 0x5, 0x5, 0x7 },   /* 0 */
+	{ 0x2, 0x2, 0x2, 0x2, 0x2 },   /* 1 */
+	{ 0x7, 0x1, 0x7, 0x4, 0x7 },   /* 2 */
+	{ 0x7, 0x1, 0x7, 0x1, 0x7 },   /* 3 */
+	{ 0x5, 0x5, 0x7, 0x1, 0x1 },   /* 4 */
+	{ 0x7, 0x4, 0x7, 0x1, 0x7 },   /* 5 */
+	{ 0x7, 0x4, 0x7, 0x5, 0x7 },   /* 6 */
+	{ 0x7, 0x1, 0x1, 0x1, 0x1 },   /* 7 */
+	{ 0x7, 0x5, 0x7, 0x5, 0x7 },   /* 8 */
+	{ 0x7, 0x5, 0x7, 0x1, 0x7 },   /* 9 */
+	{ 0x0, 0x0, 0x0, 0x0, 0x2 },   /* . */
+	{ 0x0, 0x0, 0x5, 0x7, 0x5 },   /* m -- 3x5 cannot do better: two legs, a
+	                                * bridge, and a gap on the top row */
+};
+
+/* Maps a character to its index in font3x5, or -1 for anything unprintable. */
+static int glyph_index(char c)
+{
+	if (c >= '0' && c <= '9') {
+		return c - '0';
+	}
+	if (c == '.') {
+		return 10;
+	}
+	if (c == 'm') {
+		return 11;
+	}
+	return -1;
+}
+
+/*
+ * Blit a string at (x0, y0) scaled by `sc`, clipped to the WxH canvas. Each lit
+ * pixel gets a one-pixel dark border so the text stays readable over both the
+ * camera pane and a turbo-coloured depth map, neither of which has a
+ * predictable background.
+ */
+static void draw_text(uint32_t *canvas, int W, int H, int x0, int y0, int sc,
+                      const char *s, uint32_t fg, uint32_t bg)
+{
+	for (const char *p = s; *p; p++) {
+		int gi = glyph_index(*p);
+		if (gi >= 0) {
+			for (int gy = 0; gy < GLYPH_H; gy++) {
+				for (int gx = 0; gx < GLYPH_W; gx++) {
+					if (!((font3x5[gi][gy] >> (GLYPH_W - 1 - gx)) & 1)) {
+						continue;
+					}
+					/* The -1..sc range is the glyph pixel plus its border. */
+					for (int dy = -1; dy <= sc; dy++) {
+						for (int dx = -1; dx <= sc; dx++) {
+							int px = x0 + gx * sc + dx;
+							int py = y0 + gy * sc + dy;
+							if (px < 0 || px >= W || py < 0 || py >= H) {
+								continue;
+							}
+							int inside = (dx >= 0 && dx < sc && dy >= 0 && dy < sc);
+							if (inside) {
+								canvas[(size_t)py * W + px] = fg;
+							} else if (canvas[(size_t)py * W + px] != fg) {
+								canvas[(size_t)py * W + px] = bg;
+							}
+						}
+					}
+				}
+			}
+		}
+		/* +2, not +1: each glyph carries a one-pixel border on both sides, so
+		 * a single column of advance leaves adjacent digits touching. */
+		x0 += (GLYPH_W + 2) * sc;
+	}
+}
+
+/* One-pixel rectangle outline, clipped to the canvas. */
+static void draw_rect(uint32_t *canvas, int W, int H, int x0, int y0,
+                      int w, int h, uint32_t colour)
+{
+	for (int x = x0; x < x0 + w; x++) {
+		if (x < 0 || x >= W) {
+			continue;
+		}
+		if (y0 >= 0 && y0 < H) {
+			canvas[(size_t)y0 * W + x] = colour;
+		}
+		if (y0 + h - 1 >= 0 && y0 + h - 1 < H) {
+			canvas[(size_t)(y0 + h - 1) * W + x] = colour;
+		}
+	}
+	for (int y = y0; y < y0 + h; y++) {
+		if (y < 0 || y >= H) {
+			continue;
+		}
+		if (x0 >= 0 && x0 < W) {
+			canvas[(size_t)y * W + x0] = colour;
+		}
+		if (x0 + w - 1 >= 0 && x0 + w - 1 < W) {
+			canvas[(size_t)y * W + x0 + w - 1] = colour;
+		}
+	}
+}
+
+/*
+ * Mark the probe patch on a side-by-side frame: a box on both panes plus the
+ * reading in metres. Both panes are drawn because they answer different
+ * questions -- the camera pane shows what real object the box is on, and the
+ * depth pane shows whether that region is one flat surface or straddles a depth
+ * discontinuity, which is exactly the mistake that produces a stable, plausible,
+ * wrong number.
+ */
+static void draw_probe_overlay(uint32_t *composite, int S, int patch, float metres)
+{
+	const int W = 2 * S;
+	const uint32_t green = 0xff00ff00u;
+	const uint32_t black = 0xff000000u;
+	const uint32_t white = 0xffffffffu;
+	int half = patch / 2;
+	int x0 = S / 2 - half;
+	int y0 = S / 2 - half;
+	char label[32];
+
+	if (x0 < 0) { x0 = 0; }
+	if (y0 < 0) { y0 = 0; }
+	int w = (x0 + patch > S) ? S - x0 : patch;
+	int h = (y0 + patch > S) ? S - y0 : patch;
+
+	draw_rect(composite, W, S, x0, y0, w, h, green);
+	draw_rect(composite, W, S, S + x0, y0, w, h, green);
+
+	/* Scaled so the reading stays legible at 384px without covering the box. */
+	int sc = (S >= 512) ? 3 : 2;
+	snprintf(label, sizeof(label), "%.2fm", (double)metres);
+
+	/* Below the box, or above it when the box is close to the bottom edge. */
+	int ty = y0 + h + 4 * sc;
+	if (ty + GLYPH_H * sc + 2 >= S) {
+		ty = y0 - GLYPH_H * sc - 4 * sc;
+	}
+	if (ty < 1) {
+		ty = 1;
+	}
+	draw_text(composite, W, S, x0, ty, sc, label, white, black);
+	draw_text(composite, W, S, S + x0, ty, sc, label, white, black);
+}
+
 /* ------------------------------------------------------------ display --- */
 
 static int write_all(int fd, const uint8_t *buf, size_t len)
@@ -520,13 +684,78 @@ static FILE *display_open(int w, int h, int fps)
 
 struct stage_stats {
 	double cap, pre, inf, col, disp;
+	/* Frame age at dequeue: the V4L2 buffer timestamp is on CLOCK_MONOTONIC,
+	 * the same clock now_ms() reads, so the difference is the time the frame
+	 * spent in the sensor, on the USB wire and in the driver before we saw it.
+	 * This is the part of glass-to-decision latency the per-stage timings miss
+	 * entirely -- "capture" measures a dequeue, not a frame's age. */
+	double age;
+	double age_min, age_max;
 	int n;
 };
 
 static void stats_reset(struct stage_stats *s)
 {
 	s->cap = s->pre = s->inf = s->col = s->disp = 0.0;
+	s->age = 0.0;
+	s->age_min = 1e30;
+	s->age_max = -1e30;
 	s->n = 0;
+}
+
+/*
+ * Median depth over a centre patch of the metric fp16 output, for checking the
+ * absolute scale against a tape measure. The net's output is metric metres
+ * (exponential head), and colourize()'s per-frame min/max only ever touches the
+ * BGRA copy -- net_out itself is never rescaled, so this reads true metres.
+ *
+ * Median rather than mean: a few stray pixels at a depth discontinuity would
+ * drag a mean off the surface being measured. scratch is reordered in place.
+ */
+static float centre_depth_median(const __fp16 *depth, int S, int patch, float *scratch)
+{
+	int half = patch / 2;
+	int y0 = S / 2 - half, x0 = S / 2 - half;
+	int n = 0;
+
+	if (y0 < 0) { y0 = 0; }
+	if (x0 < 0) { x0 = 0; }
+
+	for (int y = y0; y < y0 + patch && y < S; y++) {
+		for (int x = x0; x < x0 + patch && x < S; x++) {
+			scratch[n++] = (float)depth[(size_t)y * S + x];
+		}
+	}
+	if (n == 0) {
+		return 0.0f;
+	}
+	/* Quickselect for the median: linear on average. A full sort is not needed,
+	 * and an O(n^2) one would stall the loop for seconds at --probe-patch 384. */
+	int lo = 0, hi = n - 1;
+	const int k = n / 2;
+	while (lo < hi) {
+		float pivot = scratch[(lo + hi) / 2];
+		int i = lo, j = hi;
+		while (i <= j) {
+			while (scratch[i] < pivot) { i++; }
+			while (scratch[j] > pivot) { j--; }
+			if (i <= j) {
+				float t = scratch[i];
+				scratch[i] = scratch[j];
+				scratch[j] = t;
+				i++;
+				j--;
+			}
+		}
+		if (k <= j) {
+			hi = j;
+		} else if (k >= i) {
+			lo = i;
+		} else {
+			break;
+		}
+	}
+	return scratch[k];
 }
 
 static void usage(const char *prog)
@@ -544,14 +773,21 @@ static void usage(const char *prog)
 "  --no-display      Skip the GStreamer sink (headless benchmark)\n"
 "  --no-pin          Do not pin to the fastest CPU core (pinning is on by default)\n"
 "  --depth-only      Show only the depth map; default is camera|depth side by side\n"
+"  --probe-centre    Print the median metric depth of a centre patch each frame,\n"
+"                    for checking absolute scale against a tape measure\n"
+"  --probe-patch <N> Side length of that patch in model pixels  (default 32)\n"
 "  --help            This message\n"
 "\n"
-"Example:\n"
+"Examples:\n"
 "  %s --model /dev/shm/y26n_640_fp16_v73.bin --device /dev/video2 \\\n"
 "      --size 640 --frames 300 --no-display\n"
 "\n"
+"  # Absolute-scale check: aim the centre of frame at a flat surface, put a tape\n"
+"  # measure on it, and read the metre value at 0.5 / 1 / 2 / 4 m.\n"
+"  %s --model /dev/shm/y26n_384_fp16_v73.bin --probe-centre --frames 0\n"
+"\n"
 "Exit code 0 on success, non-zero on failure.\n",
-	prog, prog);
+	prog, prog, prog);
 }
 
 int main(int argc, char **argv)
@@ -564,6 +800,8 @@ int main(int argc, char **argv)
 	int no_display = 0;
 	int no_pin = 0;
 	int depth_only = 0;
+	int probe_centre = 0;
+	int probe_patch = 32;
 
 	static struct option opts[] = {
 		{ "model",       required_argument, 0, 'm' },
@@ -574,12 +812,14 @@ int main(int argc, char **argv)
 		{ "no-display",  no_argument,       0, 'n' },
 		{ "no-pin",      no_argument,       0, 'p' },
 		{ "depth-only",  no_argument,       0, 'D' },
+		{ "probe-centre", no_argument,      0, 'C' },
+		{ "probe-patch", required_argument, 0, 'P' },
 		{ "help",        no_argument,       0, 'h' },
 		{ 0, 0, 0, 0 }
 	};
 
 	for (;;) {
-		int c = getopt_long(argc, argv, "m:d:s:f:e:nphD", opts, NULL);
+		int c = getopt_long(argc, argv, "m:d:s:f:e:nphDCP:", opts, NULL);
 		if (c == -1) {
 			break;
 		}
@@ -592,6 +832,8 @@ int main(int argc, char **argv)
 		case 'n': no_display = 1; break;
 		case 'p': no_pin = 1; break;
 		case 'D': depth_only = 1; break;
+		case 'C': probe_centre = 1; break;
+		case 'P': probe_patch = atoi(optarg); break;
 		case 'h': usage(argv[0]); return 0;
 		default: usage(argv[0]); return 2;
 		}
@@ -603,6 +845,7 @@ int main(int argc, char **argv)
 	}
 	CHECK(S > 0 && S <= 4096, "bad --size %d", S);
 	CHECK(stats_every > 0, "bad --stats-every %d", stats_every);
+	CHECK(probe_patch > 0, "bad --probe-patch %d", probe_patch);
 
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
@@ -707,6 +950,12 @@ int main(int argc, char **argv)
 		fprintf(stderr, "NOTE: --size %d overridden by the binary's input %d\n", S, model_s);
 		S = model_s;
 	}
+	/* Clamped only now: S may just have been overridden by the binary's shape. */
+	if (probe_patch > S) {
+		fprintf(stderr, "NOTE: --probe-patch %d clamped to the model input %d\n",
+		        probe_patch, S);
+		probe_patch = S;
+	}
 	CHECK(in_tensors[0].v1.dataType == QNN_DATATYPE_FLOAT_16,
 	      "expected FLOAT16 input, got %d", (int)in_tensors[0].v1.dataType);
 	CHECK(out_tensors[0].v1.dataType == QNN_DATATYPE_FLOAT_16,
@@ -801,6 +1050,32 @@ int main(int argc, char **argv)
 	int frames = 0;
 	int rc = 0;
 	float dmin = 0.0f, dmax = 0.0f;
+	float probe_m = 0.0f;
+	int ts_note_done = 0;
+
+	/* Allocated outside the loop like everything else the loop touches. */
+	float *probe_scratch = NULL;
+	/* The overlay is what makes aiming possible, so it needs the camera pane;
+	 * on a bare depth map there is no way to tell a wall from a chair in front
+	 * of it, which is the mistake the overlay exists to prevent. Not an error:
+	 * the readings are still valid, they just cannot be aimed by eye. */
+	int probe_overlay = probe_centre && disp && !depth_only;
+	if (probe_centre) {
+		probe_scratch = malloc((size_t)probe_patch * probe_patch * sizeof(float));
+		CHECK(probe_scratch, "out of memory for the probe patch");
+		printf("probe            : centre %dx%d patch, median metric depth%s\n",
+		       probe_patch, probe_patch,
+		       probe_overlay ? ", box drawn on both panes" : "");
+		if (!probe_overlay) {
+			const char *why = !disp ? "--no-display" : "--depth-only";
+			printf("NOTE: no aiming overlay with %s (no camera pane); reading\n", why);
+			printf("      printed per frame instead\n");
+		}
+		if (probe_overlay) {
+			printf("NOTE: display adds ~8 ms of producer-blocking time, so the\n");
+			printf("      latency figures here are not the shipping config's\n");
+		}
+	}
 
 	while (!g_stop && (want_frames == 0 || frames < want_frames)) {
 		struct v4l2_buffer vb;
@@ -815,6 +1090,26 @@ int main(int argc, char **argv)
 			break;
 		}
 		double t1 = now_ms();
+
+		/* Age of the frame we just dequeued. Only meaningful if the driver
+		 * stamps on CLOCK_MONOTONIC; UVC does, but say so once rather than
+		 * silently reporting a number from a clock we did not verify. */
+		double age = t1 - (vb.timestamp.tv_sec * 1000.0
+		                   + vb.timestamp.tv_usec / 1000.0);
+		if (!ts_note_done) {
+			uint32_t tsm = vb.flags & V4L2_BUF_FLAG_TIMESTAMP_MASK;
+			uint32_t tss = vb.flags & V4L2_BUF_FLAG_TSTAMP_SRC_MASK;
+			printf("buffer timestamp : %s, %s\n",
+			       tsm == V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC ? "monotonic" :
+			       tsm == V4L2_BUF_FLAG_TIMESTAMP_COPY ? "copy" : "unknown/none",
+			       tss == V4L2_BUF_FLAG_TSTAMP_SRC_SOE ? "start-of-exposure" :
+			       "end-of-frame");
+			if (tsm != V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) {
+				printf("                   (frame age below is NOT trustworthy)\n");
+			}
+			fflush(stdout);
+			ts_note_done = 1;
+		}
 
 		yuyv_crop_to_rgb((const uint8_t *)cam.buf[idx], CAP_W, crop_x, crop_w, crop_h, rgb);
 		resize_to_chw_fp16(rgb, crop_w, crop_h, net_in, S);
@@ -833,6 +1128,10 @@ int main(int argc, char **argv)
 		}
 		double t3 = now_ms();
 
+		if (probe_centre) {
+			probe_m = centre_depth_median(net_out, S, probe_patch, probe_scratch);
+		}
+
 		colourize(net_out, S, lut, bgra, &dmin, &dmax);
 		double t4 = now_ms();
 
@@ -845,6 +1144,9 @@ int main(int argc, char **argv)
 				frame_bytes = (size_t)S * S * 4;
 			} else {
 				compose_side_by_side(rgb, crop_w, crop_h, bgra, S, composite);
+				if (probe_centre) {
+					draw_probe_overlay(composite, S, probe_patch, probe_m);
+				}
 				frame = (const uint8_t *)composite;
 				frame_bytes = (size_t)S * 2 * S * 4;
 			}
@@ -867,16 +1169,28 @@ int main(int argc, char **argv)
 			st.inf += t3 - t2;
 			st.col += t4 - t3;
 			st.disp += t5 - t4;
+			st.age += age;
+			if (age < st.age_min) { st.age_min = age; }
+			if (age > st.age_max) { st.age_max = age; }
 			st.n++;
 		}
 		frames++;
 
-		if (st.n > 0 && frames % stats_every == 0) {
+		/* When probing without the overlay to read, every frame is a reading:
+		 * the tape measure is not going to hold still for stats_every frames.
+		 * With the overlay up, the screen is the readout and printing every
+		 * frame would only add blocking writes to the latency being measured. */
+		if (probe_centre && !probe_overlay) {
+			printf("[%5d] centre %6.3f m  (frame age %5.2f ms)\n",
+			       frames, probe_m, age);
+			fflush(stdout);
+		} else if (st.n > 0 && frames % stats_every == 0) {
 			double e2e = (now_ms() - t_run0) / st.n;
 			printf("[%5d] cap %5.2f | pre %5.2f | inf %6.2f | col %5.2f | disp %5.2f ms"
-			       "  -> %5.1f fps  (depth %.2f-%.2f m)\n",
+			       "  -> %5.1f fps  (depth %.2f-%.2f m, age %5.2f ms)\n",
 			       frames, st.cap / st.n, st.pre / st.n, st.inf / st.n,
-			       st.col / st.n, st.disp / st.n, 1000.0 / e2e, dmin, dmax);
+			       st.col / st.n, st.disp / st.n, 1000.0 / e2e, dmin, dmax,
+			       st.age / st.n);
 			fflush(stdout);
 		}
 	}
@@ -926,6 +1240,14 @@ int main(int argc, char **argv)
 		       (st.cap + st.pre + st.inf + st.col + st.disp) / st.n);
 		printf("end-to-end       : %6.2f ms   -> %.1f FPS\n",
 		       t_total / st.n, 1000.0 * st.n / t_total);
+		/* Frame age overlaps "capture" rather than adding to it, so it is
+		 * reported apart from the stage breakdown above -- do not sum them. */
+		printf("frame age at dq  : %6.2f ms   (min %.2f, max %.2f; sensor + USB +\n",
+		       st.age / st.n, st.age_min, st.age_max);
+		printf("                   driver, before the loop saw the frame)\n");
+		printf("glass-to-display : %6.2f ms   (frame age + preprocess + inference\n",
+		       st.age / st.n + (st.pre + st.inf + st.col + st.disp) / st.n);
+		printf("                   + colourize + display; excludes exposure itself)\n");
 	} else {
 		fprintf(stderr, "ERROR: no frames completed\n");
 		rc = rc ? rc : 1;
@@ -943,6 +1265,7 @@ int main(int argc, char **argv)
 	free(bgra);
 	free(composite);
 	free(lut);
+	free(probe_scratch);
 	free(bin_buf);
 	return rc;
 }
