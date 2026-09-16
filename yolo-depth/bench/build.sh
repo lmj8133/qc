@@ -4,7 +4,7 @@
 #
 # Usage:  ./build.sh [board-ip]
 set -euo pipefail
-BOARD="${1:-192.168.3.80}"
+BOARD="${1:-192.168.3.67}"
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 root@$BOARD"
 
 scp -o BatchMode=yes qnn_bench.c "root@$BOARD:/dev/shm/"

@@ -5,7 +5,7 @@
 | 狀態 | ✅ **完成且可運作**。相機 → NPU → HDMI 即時執行中 |
 | 日期 | 2026-09-15（本文與所有工作均已 commit） |
 | 主機 | x86 Ubuntu 24.04，`/home/mjl/qc`（git，branch `master`） |
-| 板子 | `root@192.168.3.80`（金鑰登入，`BatchMode=yes` 可用） |
+| 板子 | `root@192.168.3.67`（金鑰登入，`BatchMode=yes` 可用）—— **IP 會變，見〈IP 是 DHCP〉** |
 
 > **這份文件是索引，不是教學。** 專案已有六份文件共約 2000 行，
 > 本文的主要工作是告訴你「哪個問題該去看哪一份」——**不要從頭讀完它們**。
@@ -219,7 +219,7 @@ Wayland socket 在那裡，所以顯示需要它；PulseAudio 跑 system mode，
 殘留 process 手動清除：
 
 ```bash
-ssh root@192.168.3.80 'pkill -x depth_cam; pkill -f gst-launch-1.0'
+ssh root@192.168.3.67 'pkill -x depth_cam; pkill -f gst-launch-1.0'
 ```
 
 ---
@@ -247,10 +247,10 @@ ssh root@192.168.3.80 'pkill -x depth_cam; pkill -f gst-launch-1.0'
 
 | 項目 | 值 |
 |---|---|
-| SSH | `root@192.168.3.80`（**僅金鑰**，`oelinux123` 不能用於 SSH） |
+| SSH | `root@192.168.3.67`（**僅金鑰**，`oelinux123` 不能用於 SSH） |
 | UART | `/dev/ttyUSB0`, 115200/8N1，帳密 `root` / `oelinux123` |
 | 相機 | `/dev/video2`（USB UVC，640x480 YUYV，30 fps 上限） |
-| 板上工作區 | **只能寫 `/dev/shm`**（tmpfs，重開機即失） |
+| 板上工作區 | pipeline 用 `/dev/shm`（tmpfs，**重開機即失**）；`/` 可寫且重開存活（`/dev/sda2`，70G 可用） |
 | Wayland | `XDG_RUNTIME_DIR=/run/user/root`、`WAYLAND_DISPLAY=wayland-1` |
 
 **⛔ 硬規則：絕不燒錄、抹除、重開機，或改動板子的 `/opt` 與非揮發性設定。**
@@ -265,8 +265,18 @@ ssh root@192.168.3.80 'pkill -x depth_cam; pkill -f gst-launch-1.0'
 
 ### IP 是 DHCP，會變動
 
-撰寫期間 IP 曾由 `192.168.3.63` 變成 `192.168.3.80`，一度誤判為當機。
+IP 已變動三次：`192.168.3.63` → `.80` → `.67`（2026-09-16）。
+**每一次都被誤判為當機**，包括最後這次。
 **連不上時先找出新 IP**，不要先懷疑板子壞了：
+
+> ⚠️ **陷阱：ARP 快取會騙你。** 舊 IP 的 `ip neigh show` 仍會顯示
+> `REACHABLE` 並掛著板子的 MAC（`a0:36:bc:3c:ab:10`），但 SSH 與 ping 都 timeout
+> —— 看起來完全像 kernel hang。**不要拿 ARP 狀態判斷板子生死。**
+>
+> 另外：IP 變動若伴隨重開機，`/dev/shm`（tmpfs）裡 staged 的 `.bin` 也沒了。
+> `run.sh` 每次都會重新 stage，但手動跑 `depth_cam` 不會。
+>
+> `yolo-depth/pipeline/board.env` 是 `build.sh` / `run.sh` 共用的預設值，改一處即可。
 
 ```bash
 # 1. 掃網段找開著 22 port 的機器（純 bash，不需安裝任何東西；已實測可找到板子）

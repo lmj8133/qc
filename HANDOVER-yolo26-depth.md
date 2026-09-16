@@ -49,7 +49,7 @@ ONNX 參考值      : min=2.4426 max=3.8946 mean=3.1188 std=0.3460
 | OS | Ubuntu 22.04.2 LTS (Jammy), aarch64 |
 | Kernel | `5.15.170-qki-consolidate-android13-8-00002-g576728c775df-dirty` |
 | 映像版本 | V00.00.03 / Metadata Revision `576728c775dfa24956eb041f8ea23242f468a6aa` |
-| 連線 | SSH `root@192.168.3.80`（金鑰登入）、ADB、UART |
+| 連線 | SSH `root@192.168.3.67`（金鑰登入，**IP 會變**）、ADB、UART |
 | 交叉編譯 SDK | 已安裝於 `/home/agmis/Documents/qc/sdk`，版本 hash 與板子一致 |
 
 ### 板上既有的推論資源
@@ -492,7 +492,7 @@ V4L2 YUYV 擷取 → YUY2→RGB → 置中裁切+縮放 → fp16 NCHW
 
 | 項目 | 值 |
 |---|---|
-| SSH | `root@192.168.3.80`（金鑰，見下方注意事項） |
+| SSH | `root@192.168.3.67`（金鑰，見下方注意事項） |
 | ADB | `adb shell`（以 uid 2000 執行，權限受限） |
 | UART | `/dev/ttyUSB0`, 115200/8N1；帳密 `root` / `oelinux123` |
 | 測試檔 | `/data/test/`（影片、音訊） |
@@ -510,6 +510,7 @@ V4L2 YUYV 擷取 → YUY2→RGB → 置中裁切+縮放 → fp16 NCHW
 ### ⚠️ IP 為 DHCP 配發，會變動
 
 本文件撰寫期間板子 IP 由 `192.168.3.63` 變為 `192.168.3.80`，一度誤判為當機。
+2026-09-16 再變為 `192.168.3.67`，又一次誤判 —— 注意舊 IP 的 ARP 仍顯示 `REACHABLE`。
 **連不上時先確認 IP**，不要直接假設板子故障：
 
 ```bash

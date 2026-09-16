@@ -39,10 +39,30 @@ than assuming anything survived a reboot.
 
 Override the board address with `BOARD=<ip> ./run.sh`.
 
+### The board's IP moves — it is not a hung board
+
+The address is DHCP-assigned and has changed three times (`192.168.3.63` →
+`.80` → `.67`). Each time it looks exactly like a dead board: SSH and `ping`
+both time out while the **stale ARP entry still reads `REACHABLE`**, which is
+what makes the misdiagnosis so easy. `build.sh` now fails fast with a pointer
+instead of hanging.
+
+The default lives in `board.env`, sourced by both scripts, so a move is one
+edit. To find the board after it moves, sweep the subnet for its MAC:
+
+```bash
+for i in $(seq 1 254); do (ping -c1 -W1 192.168.3.$i >/dev/null 2>&1 &); done
+sleep 5; ip neigh show | grep -i a0:36:bc:3c:ab:10
+```
+
+Its hostname is `kalama`. Note that `/dev/shm` is a tmpfs, so an IP change that
+came with a reboot also means the staged `.bin` is gone — `run.sh` re-stages
+every time, but a manual `depth_cam` invocation will not.
+
 ## Build (manual)
 
 ```bash
-./build.sh [board-ip]        # default 192.168.3.80
+./build.sh [board-ip]        # default from board.env
 ```
 
 Copies the source to `/dev/shm` and compiles natively (the board has gcc):
@@ -55,7 +75,7 @@ gcc -O3 -march=armv8.2-a+fp16 -Wall -Wextra -o depth_cam depth_cam.c \
 Stage a context binary once:
 
 ```bash
-scp ../artifacts/y26n_640_fp16_v73.bin root@192.168.3.80:/dev/shm/
+scp ../artifacts/y26n_640_fp16_v73.bin root@192.168.3.67:/dev/shm/
 ```
 
 ## Run
@@ -253,7 +273,7 @@ Belt and braces, because a dropped link delivers no signal at all:
 If something ever does survive (say the board was power-cycled mid-run):
 
 ```bash
-ssh root@192.168.3.80 'pkill -x depth_cam; pkill -f gst-launch-1.0'
+ssh root@192.168.3.67 'pkill -x depth_cam; pkill -f gst-launch-1.0'
 ```
 
 Symptom to recognise: a later run fails with

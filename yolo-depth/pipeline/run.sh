@@ -18,8 +18,10 @@ shift $(( $# > 2 ? 2 : $# ))
 # Anything after the mode is passed through to depth_cam verbatim, e.g.
 #   ./run.sh 512 live --depth-only
 EXTRA="$*"   # plain string: safe under `set -u` when empty
-BOARD="${BOARD:-192.168.3.80}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=board.env
+source "$HERE/board.env"
+BOARD="${BOARD:-$BOARD_DEFAULT}"
 BIN="y26n_${SIZE}_fp16_v73.bin"
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 root@${BOARD}"
 # -t allocates a TTY so Ctrl-C reaches the remote process group. Without it the

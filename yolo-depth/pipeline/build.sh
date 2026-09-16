@@ -4,9 +4,18 @@
 #
 # Usage:  ./build.sh [board-ip]
 set -euo pipefail
-BOARD="${1:-192.168.3.80}"
-SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 root@$BOARD"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=board.env
+source "$HERE/board.env"
+BOARD="${1:-$BOARD_DEFAULT}"
+SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 root@$BOARD"
+
+if ! $SSH true 2>/dev/null; then
+	echo "ERROR: no SSH to the board at $BOARD" >&2
+	echo "The board's IP has moved before (.63 -> .80 -> .67) and looks just" >&2
+	echo "like a hung board when it does. See board.env for how to find it." >&2
+	exit 1
+fi
 
 scp -o BatchMode=yes "$HERE/depth_cam.c" "root@$BOARD:/dev/shm/"
 # shellcheck disable=SC2087
