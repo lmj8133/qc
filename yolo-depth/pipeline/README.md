@@ -203,6 +203,33 @@ the board) and costs ~135 ms, so it is excluded from the stage timings and the
 run clock is shifted to match; steady state stays 30.2 FPS. The key needs a
 terminal, so it is simply inert when stdout is piped or redirected.
 
+### Viewing the snapshots on the board
+
+The board has no general image viewer — no `eog`, `feh`, `imv`, `gpicview`. It
+does have Weston's own `weston-image`, and GStreamer has `pngdec`, so
+`shots.sh` wraps whichever fits and puts the image on the board's HDMI output:
+
+```bash
+shots.sh           # step through every shot, Enter for next
+shots.sh -f        # fullscreen (the GStreamer path)
+shots.sh -t 3      # 3 seconds each, no keypress
+shots.sh -l        # just list them with sizes and times
+shots.sh -d <dir>  # somewhere other than /dev/shm
+```
+
+It is installed on the board at `/usr/local/bin/shots.sh`; the versioned copy is
+`yolo-depth/pipeline/shots.sh`.
+
+To look at them off the board instead, copy them over — often easier for
+comparing several readings side by side:
+
+```bash
+scp root@<board>:/dev/shm/'shot-*.png' .
+```
+
+Remember `/dev/shm` is a tmpfs: **snapshots do not survive a reboot.** Use
+`--snap-dir` to write somewhere on `/` if you want to keep them.
+
 ### ⚠️ The camera halves its own frame rate in dim light
 
 This UVC camera exposes `V4L2_CID_EXPOSURE_AUTO_PRIORITY`
