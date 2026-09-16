@@ -108,6 +108,8 @@ cd /dev/shm
 | `--calibrate` | off | Apply the laser-fitted affine depth correction (see below) |
 | `--cal-a <f>` | 1.038 | Calibration slope |
 | `--cal-b <f>` | 0.357 | Calibration offset, metres |
+| `--target <name>` | *(none)* | Tag snapshots with what is measured; goes in the filename |
+| `--ref <metres>` | *(none)* | Ground-truth distance, also in the filename |
 | `--help` | | Usage with an example |
 
 Exit code 0 on success, non-zero on failure.
@@ -152,13 +154,10 @@ Pow(cal_a) -> Mul(exp(cal_b))`, an exponential metric head, and `colourize()`'s
 per-frame min/max normalization only ever writes the BGRA copy — `net_out` is
 never rescaled. So the fp16 values are metres and can be compared with a ruler.
 
-What has *not* been established is how accurate those metres are. The 0.9997
-correlation quoted elsewhere is FP16 conversion error against the same-size ONNX
-reference, not absolute depth accuracy, and NYU val has never been run. Two
-specific reasons to expect a bias: the centre crop from 640x480 to 480x480
-changes focal-length-in-pixels, which is exactly what monocular metric depth is
-conditioned on; and the shipped calibration constants are not identity
-(`cal_a = 1.0` but `exp(cal_b) = 0.8237834`).
+How accurate those metres are has now been measured against a laser rangefinder,
+and the answer is **not accurate enough for obstacle avoidance** — see below.
+(The 0.9997 correlation quoted elsewhere is FP16 conversion error against the
+same-size ONNX reference, not absolute accuracy.)
 
 ```bash
 ./run.sh 384 live --probe-centre --fullscreen --text-scale 6
@@ -206,64 +205,47 @@ the board) and costs ~135 ms, so it is excluded from the stage timings and the
 run clock is shifted to match; steady state stays 30.2 FPS. The key needs a
 terminal, so it is simply inert when stdout is piped or redirected.
 
-### Measured against a laser rangefinder (2026-09-16)
+### Measured against a laser rangefinder — the correction does not generalise
 
-384px model, 480x480 centre crop, one person standing in an office:
+**Result: the error depends on what is being measured, so no single calibration
+fixes it.** Full analysis and the source images are in
+`../measurements/2026-09-16-laser/`.
 
-| laser | raw | error | relative |
-|---|---|---|---|
-| 0.498 m | 0.82 m | +0.32 m | **+64.7%** |
-| 0.990 m | 1.32 m | +0.33 m | +33.3% |
-| 1.990 m | 2.61 m | +0.62 m | +31.2% |
-| 4.040 m | 4.48 m | +0.44 m | +10.9% |
-
-The relative error collapses from 65% to 11% while the absolute error stays near
-+0.4 m, which is the signature of an **offset, not a scale error**:
+| laser | person | error | wall | error |
+|---|---|---|---|---|
+| 0.50 m | 0.82 m | +65% | 1.00 m | **+99%** |
+| 1.00 m | 1.32 m | +33% | 3.12 m | **+212%** |
+| 2.00 m | 2.61 m | +31% | 5.86 m | **+192%** |
+| 4.00 m | 4.48 m | +11% | 7.59 m | **+89%** |
 
 ```
-raw = 1.038 * true + 0.357      R^2 = 0.994
+person: raw = 1.038 * true + 0.356    R^2 = 0.994
+wall:   raw = 1.771 * true + 1.064    R^2 = 0.887
 ```
 
-The slope is within 4% of 1, so the scale is essentially right. Note this
-contradicts the obvious suspect — a pure scale factor from the head's
-`exp(cal_b) = 0.8238` would not fit (its residuals are 5x worse).
+The slopes differ by 70%, and applying the person fit to the wall still leaves
++166% error at 1–2 m. A monocular net infers depth from priors about apparent
+size and occlusion: a person is a known-size object it was trained on; a
+featureless wall offers no cue and the net guesses. The depth pane in
+`wall-ref50cm-raw100cm.png` renders a flat wall as a broad blue-to-red gradient
+— it never recognised a plane at all.
 
-`--calibrate` applies the inverse, leaving ±6 cm at three of the four points
-(+18 cm at 1.99 m). It is **off by default**, for two reasons that are not yet
-resolved:
+Every reading is an **over**estimate, which is the dangerous direction: a wall
+1 m away reads as 3.12 m.
 
-**1. Every point is the same target.** One person, one pose, one room. A
-monocular net infers depth from learned priors about apparent size and
-occlusion, so the offset may be a property of *"a person indoors"* rather than
-of the camera. This data fits that hypothesis exactly as well as it fits a
-systematic camera offset and cannot distinguish them. The depth pane in
-`shot-004.png` shows the person segmented cleanly from the wall behind, which is
-a reason to suspect the net treats people as their own class.
-
-**To settle it**, repeat the sweep against a flat wall and a cardboard box. If
-all three targets offset by +0.3–0.4 m it is systematic and the correction is
-sound; if the wall offsets by +0.1 m and the person by +0.36 m, this whole
-approach fails and per-object calibration is not viable.
-
-**2. Nothing was measured closer than 0.498 m** — where the relative error is
-already twice that of any other point. A four-point line extrapolated below its
-measured range has no basis, and the correction goes to zero for raw < 0.357 m
-(raw 0.40 m corrects to an absurd 0.04 m). **Near-field is exactly where
-obstacle avoidance needs accuracy most**, and an uncalibrated 0.5 m obstacle
-reads as 0.82 m — 32 cm of clearance that is not there, in the dangerous
-direction. Readings below 0.45 m are flagged `BELOW FITTED RANGE` rather than
-silently trusted.
-
-Both raw and corrected values are always printed together, so a reading is never
-silently transformed:
+`--calibrate` applies the person fit and is **off by default**. It is kept
+because it documents the method, not because it makes the output trustworthy;
+it also has no data below 0.498 m, where it extrapolates to nonsense (raw
+0.40 m → 0.04 m), so readings there are flagged. Raw and corrected values are
+always printed together:
 
 ```
 [    2] centre  0.928 m  (raw  1.320, frame age 33.06 ms)
 ```
 
-The constants are specific to this resolution, crop and camera — monocular
-metric depth is conditioned on focal-length-in-pixels. Override with `--cal-a`
-and `--cal-b` after re-measuring; do not carry these numbers to another setup.
+Use `--target <name>` and `--ref <metres>` when taking measurements: both go
+into the snapshot filename, so each image records its own measurement
+(`shot-003-wall-ref200cm-raw586cm.png`).
 
 ### Viewing the snapshots on the board
 

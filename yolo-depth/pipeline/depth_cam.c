@@ -44,6 +44,7 @@
 #include <sched.h>
 #include <sys/select.h>
 #include <termios.h>
+#include <dirent.h>
 
 #include "QnnInterface.h"
 #include "QnnContext.h"
@@ -687,26 +688,33 @@ static void draw_probe_overlay(uint32_t *composite, int S, int patch, float metr
  * NOT the pure scale factor exp(cal_b) = 0.8238 in the ONNX head would predict.
  * Applying it leaves +-6 cm at three of the four points (+18 cm at 1.99 m).
  *
- * TWO REASONS THIS IS NOT YET TRUSTWORTHY, both unresolved:
+ * THIS FIT IS TARGET-SPECIFIC AND THEREFORE NOT A GENERAL CORRECTION.
  *
- * 1. Every point is the same target -- one person, one pose, one room. A
- *    monocular net infers depth from learned priors about apparent size and
- *    occlusion, so the offset may be a property of "a person indoors" rather
- *    than of the camera. The data fits that hypothesis exactly as well as it
- *    fits a systematic camera offset, and cannot separate them. Repeating the
- *    sweep against a wall and a cardboard box is what would settle it; until
- *    then this correction is only known to hold for people.
+ * The same sweep against a flat wall the same afternoon gave a completely
+ * different relationship:
  *
- * 2. Nothing was measured closer than 0.498 m, where the relative error is
- *    already twice that of any other point. Extrapolating a four-point line
- *    below the measured range has no basis, and the correction turns negative
- *    for raw < 0.357 m. Near-field is exactly where obstacle avoidance needs
- *    accuracy most, so it is clamped rather than extrapolated, and the clamp
- *    is reported instead of being silently applied.
+ *     laser   raw     error
+ *     0.503   1.00   +98.8%
+ *     1.001   3.12  +211.7%
+ *     2.004   5.86  +192.4%
+ *     4.008   7.59   +89.4%
  *
- * Off by default for those reasons. The numbers are also specific to this
- * resolution, crop and camera: monocular metric depth is conditioned on
- * focal-length-in-pixels, so changing any of them invalidates the fit.
+ *     wall:   raw = 1.771 * true + 1.064,  R^2 = 0.887
+ *     person: raw = 1.038 * true + 0.356,  R^2 = 0.994
+ *
+ * The slopes differ by 70%, and applying the person fit to the wall leaves
+ * +166% error at 1-2 m. A monocular net infers depth from learned priors about
+ * apparent size and occlusion: a person is a known-size object it was trained
+ * on, a featureless wall offers no cue at all and the net simply guesses.
+ *
+ * So the offset belongs to the target, not to the camera, and no single affine
+ * correction can fix it. See measurements/2026-09-16-laser/REPORT.md.
+ *
+ * Kept, off by default, because it documents the method and the person fit is
+ * real -- not because it makes the output trustworthy. Nothing was measured
+ * below 0.498 m either, where the correction extrapolates to nonsense (raw
+ * 0.40 m -> 0.04 m), so readings there are flagged. The constants are also
+ * specific to this resolution, crop and camera.
  */
 #define CAL_A 1.038f
 #define CAL_B 0.357f
@@ -759,6 +767,48 @@ static int snapshot_png(const uint8_t *bgra, int w, int h, const char *path)
 		fprintf(stderr, "WARN: snapshot %s failed\n", path);
 	}
 	return rc;
+}
+
+/*
+ * True when any file starts with this prefix. Snapshot names carry the reading,
+ * so the index is the only stable part -- a plain access() on the full name
+ * would never match and the counter would reuse indices from a previous run.
+ */
+static int index_taken(const char *prefix)
+{
+	const char *slash = strrchr(prefix, '/');
+	char dirbuf[512];
+	const char *dir, *base;
+	DIR *d;
+	struct dirent *e;
+	int found = 0;
+
+	if (slash) {
+		size_t dlen = (size_t)(slash - prefix);
+		if (dlen >= sizeof(dirbuf)) {
+			return 0;
+		}
+		memcpy(dirbuf, prefix, dlen);
+		dirbuf[dlen] = '\0';
+		dir = dirbuf;
+		base = slash + 1;
+	} else {
+		dir = ".";
+		base = prefix;
+	}
+
+	d = opendir(dir);
+	if (!d) {
+		return 0;
+	}
+	while ((e = readdir(d)) != NULL) {
+		if (strncmp(e->d_name, base, strlen(base)) == 0) {
+			found = 1;
+			break;
+		}
+	}
+	closedir(d);
+	return found;
 }
 
 /*
@@ -967,6 +1017,10 @@ static void usage(const char *prog)
 "                    data below 0.45 m\n"
 "  --cal-a <f>       Calibration slope       (default 1.038)\n"
 "  --cal-b <f>       Calibration offset in m (default 0.357)\n"
+"  --target <name>   Tag snapshots with what is being measured, e.g. person,\n"
+"                    wall, box -- it goes in the filename\n"
+"  --ref <metres>    Ground-truth distance for the current shot, also in the\n"
+"                    filename, so a snapshot records its own measurement\n"
 "  --snap-dir <path> Where the 's' key writes PNG snapshots  (default /dev/shm)\n"
 "                    Press 's' while running to save the frame as displayed;\n"
 "                    needs a terminal, so it is inert under a pipe or redirect\n"
@@ -1000,6 +1054,8 @@ int main(int argc, char **argv)
 	int fullscreen = 0;
 	const char *snap_dir = "/dev/shm";
 	int calibrate = 0;
+	const char *target = "";
+	float ref_m = 0.0f;
 	float cal_a = CAL_A;
 	float cal_b = CAL_B;
 
@@ -1018,6 +1074,8 @@ int main(int argc, char **argv)
 		{ "fullscreen",  no_argument,       0, 'F' },
 		{ "snap-dir",    required_argument, 0, 'S' },
 		{ "calibrate",   no_argument,       0, 'c' },
+		{ "target",      required_argument, 0, 't' },
+		{ "ref",         required_argument, 0, 'r' },
 		{ "cal-a",       required_argument, 0, 'A' },
 		{ "cal-b",       required_argument, 0, 'B' },
 		{ "help",        no_argument,       0, 'h' },
@@ -1025,7 +1083,7 @@ int main(int argc, char **argv)
 	};
 
 	for (;;) {
-		int c = getopt_long(argc, argv, "m:d:s:f:e:nphDCP:T:FS:cA:B:", opts, NULL);
+		int c = getopt_long(argc, argv, "m:d:s:f:e:nphDCP:T:FS:cA:B:t:r:", opts, NULL);
 		if (c == -1) {
 			break;
 		}
@@ -1044,6 +1102,8 @@ int main(int argc, char **argv)
 		case 'F': fullscreen = 1; break;
 		case 'S': snap_dir = optarg; break;
 		case 'c': calibrate = 1; break;
+		case 't': target = optarg; break;
+		case 'r': ref_m = (float)atof(optarg); break;
 		case 'A': cal_a = (float)atof(optarg); break;
 		case 'B': cal_b = (float)atof(optarg); break;
 		case 'h': usage(argv[0]); return 0;
@@ -1291,10 +1351,9 @@ int main(int argc, char **argv)
 	}
 	if (calibrate) {
 		printf("calibration      : true = (raw - %.3f) / %.3f\n", cal_b, cal_a);
-		printf("NOTE: fitted on ONE target type (a person) over 0.50-4.04 m.\n");
-		printf("      Unverified for other objects, and below %.2f m it is\n",
-		       CAL_MIN_VALID_M);
-		printf("      extrapolation -- readings there are flagged.\n");
+		printf("NOTE: fitted on people only. A flat wall needs a 70%% different\n");
+		printf("      slope, and this fit leaves +166%% error on one. It is NOT a\n");
+		printf("      general correction -- see measurements/2026-09-16-laser/.\n");
 	}
 	if (probe_centre) {
 		probe_scratch = malloc((size_t)probe_patch * probe_patch * sizeof(float));
@@ -1423,7 +1482,44 @@ int main(int argc, char **argv)
 					frame = (const uint8_t *)composite;
 					fw = 2 * S;
 				}
-				snprintf(path, sizeof(path), "%s/shot-%03d.png", snap_dir, ++snaps);
+				/*
+				 * Self-describing filename: which target, what the laser says,
+				 * what the model read. A directory of shot-001.png tells you
+				 * nothing a week later, and these files ARE the measurement
+				 * record -- the numbers belong on them, not in a side note.
+				 *
+				 * Never overwrite either: the counter restarts at zero every
+				 * run, so a plain shot-001 silently destroyed the previous
+				 * session's measurements. Skip past whatever is there.
+				 */
+				char meta[192];
+				int n = 0;
+				char probe[256];
+
+				if (target[0]) {
+					n += snprintf(meta + n, sizeof(meta) - (size_t)n,
+					              "-%s", target);
+				}
+				if (ref_m > 0.0f) {
+					n += snprintf(meta + n, sizeof(meta) - (size_t)n,
+					              "-ref%.0fcm", (double)(ref_m * 100.0f));
+				}
+				if (probe_centre) {
+					n += snprintf(meta + n, sizeof(meta) - (size_t)n,
+					              "-raw%.0fcm", (double)(probe_raw * 100.0f));
+					if (calibrate) {
+						snprintf(meta + n, sizeof(meta) - (size_t)n,
+						         "-cal%.0fcm", (double)(probe_m * 100.0f));
+					}
+				}
+				/* The index alone decides uniqueness -- the suffix changes with
+				 * every reading, so globbing on it would never collide and the
+				 * counter would happily reuse an index. */
+				do {
+					snprintf(probe, sizeof(probe), "%s/shot-%03d",
+					         snap_dir, ++snaps);
+				} while (index_taken(probe));
+				snprintf(path, sizeof(path), "%s%s.png", probe, meta);
 				if (snapshot_png(frame, fw, S, path) == 0) {
 					if (probe_centre) {
 						if (calibrate) {
