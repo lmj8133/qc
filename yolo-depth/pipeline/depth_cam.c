@@ -597,7 +597,8 @@ static void draw_rect(uint32_t *canvas, int W, int H, int x0, int y0,
  * discontinuity, which is exactly the mistake that produces a stable, plausible,
  * wrong number.
  */
-static void draw_probe_overlay(uint32_t *composite, int S, int patch, float metres)
+static void draw_probe_overlay(uint32_t *composite, int S, int patch, float metres,
+                               int text_scale)
 {
 	const int W = 2 * S;
 	const uint32_t green = 0xff00ff00u;
@@ -616,8 +617,9 @@ static void draw_probe_overlay(uint32_t *composite, int S, int patch, float metr
 	draw_rect(composite, W, S, x0, y0, w, h, green);
 	draw_rect(composite, W, S, S + x0, y0, w, h, green);
 
-	/* Scaled so the reading stays legible at 384px without covering the box. */
-	int sc = (S >= 512) ? 3 : 2;
+	/* 0 = pick a size that stays legible without covering the box; the reading
+	 * is the point of the overlay, so a caller may ask for bigger. */
+	int sc = text_scale > 0 ? text_scale : ((S >= 512) ? 3 : 2);
 	snprintf(label, sizeof(label), "%.2fm", (double)metres);
 
 	/* Below the box, or above it when the box is close to the bottom edge. */
@@ -628,8 +630,19 @@ static void draw_probe_overlay(uint32_t *composite, int S, int patch, float metr
 	if (ty < 1) {
 		ty = 1;
 	}
-	draw_text(composite, W, S, x0, ty, sc, label, white, black);
-	draw_text(composite, W, S, S + x0, ty, sc, label, white, black);
+	/* Pull a wide label back inside its own pane: at a large --text-scale the
+	 * reading would otherwise run off the right edge and get clipped mid-digit,
+	 * which is worse than useless when the digits are the point. */
+	int text_w = (int)strlen(label) * (GLYPH_W + 2) * sc;
+	int tx = x0;
+	if (tx + text_w > S) {
+		tx = S - text_w;
+	}
+	if (tx < 1) {
+		tx = 1;
+	}
+	draw_text(composite, W, S, tx, ty, sc, label, white, black);
+	draw_text(composite, W, S, S + tx, ty, sc, label, white, black);
 }
 
 /* ------------------------------------------------------------ display --- */
@@ -655,7 +668,7 @@ static int write_all(int fd, const uint8_t *buf, size_t len)
  * Weston's socket for root is at /run/user/root/wayland-1, NOT /run/user/0 --
  * waylandsink fails to reach PAUSED with the documented path.
  */
-static FILE *display_open(int w, int h, int fps)
+static FILE *display_open(int w, int h, int fps, int fullscreen)
 {
 	char cmd[768];
 	snprintf(cmd, sizeof(cmd),
@@ -664,7 +677,9 @@ static FILE *display_open(int w, int h, int fps)
 	         "rawvideoparse use-sink-caps=false width=%d height=%d format=bgra "
 	         /* No videoconvert: waylandsink takes BGRA natively, and at 2S wide
 	          * the extra copy cost ~6 ms/frame for nothing. */
-	         "framerate=%d/1 ! waylandsink sync=false "
+	         /* Scaling to the panel happens in the compositor, so the frames we
+	          * write stay SxS -- fullscreen costs no extra per-frame CPU. */
+	         "framerate=%d/1 ! waylandsink sync=false %s"
 	         /* gst-launch prints a running position counter ("0:00:01.2 / ...")
 	          * to STDOUT even under -q, which floods an interactive ssh -t
 	          * session and hides our own stats lines. Only the child's stdin is
@@ -672,7 +687,7 @@ static FILE *display_open(int w, int h, int fps)
 	          * drop both. Failures still surface: popen/write errors are caught
 	          * by the caller, and a dead sink shows up as a write failure. */
 	         ">/dev/null 2>&1",
-	         w, h, fps);
+	         w, h, fps, fullscreen ? "fullscreen=true " : "");
 	FILE *p = popen(cmd, "w");
 	if (!p) {
 		fprintf(stderr, "WARN: popen(gst-launch-1.0) failed: %s\n", strerror(errno));
@@ -776,6 +791,10 @@ static void usage(const char *prog)
 "  --probe-centre    Print the median metric depth of a centre patch each frame,\n"
 "                    for checking absolute scale against a tape measure\n"
 "  --probe-patch <N> Side length of that patch in model pixels  (default 32)\n"
+"  --text-scale <N>  Pixel size of one bitmap-font dot in the overlay reading\n"
+"                    (default 2 below 512px, else 3; raise it to read further away)\n"
+"  --fullscreen      Scale the display to fill the panel (compositor does it,\n"
+"                    so it costs no per-frame CPU)\n"
 "  --help            This message\n"
 "\n"
 "Examples:\n"
@@ -802,6 +821,8 @@ int main(int argc, char **argv)
 	int depth_only = 0;
 	int probe_centre = 0;
 	int probe_patch = 32;
+	int text_scale = 0;      /* 0 = pick from S in draw_probe_overlay() */
+	int fullscreen = 0;
 
 	static struct option opts[] = {
 		{ "model",       required_argument, 0, 'm' },
@@ -814,12 +835,14 @@ int main(int argc, char **argv)
 		{ "depth-only",  no_argument,       0, 'D' },
 		{ "probe-centre", no_argument,      0, 'C' },
 		{ "probe-patch", required_argument, 0, 'P' },
+		{ "text-scale",  required_argument, 0, 'T' },
+		{ "fullscreen",  no_argument,       0, 'F' },
 		{ "help",        no_argument,       0, 'h' },
 		{ 0, 0, 0, 0 }
 	};
 
 	for (;;) {
-		int c = getopt_long(argc, argv, "m:d:s:f:e:nphDCP:", opts, NULL);
+		int c = getopt_long(argc, argv, "m:d:s:f:e:nphDCP:T:F", opts, NULL);
 		if (c == -1) {
 			break;
 		}
@@ -834,6 +857,8 @@ int main(int argc, char **argv)
 		case 'D': depth_only = 1; break;
 		case 'C': probe_centre = 1; break;
 		case 'P': probe_patch = atoi(optarg); break;
+		case 'T': text_scale = atoi(optarg); break;
+		case 'F': fullscreen = 1; break;
 		case 'h': usage(argv[0]); return 0;
 		default: usage(argv[0]); return 2;
 		}
@@ -846,6 +871,8 @@ int main(int argc, char **argv)
 	CHECK(S > 0 && S <= 4096, "bad --size %d", S);
 	CHECK(stats_every > 0, "bad --stats-every %d", stats_every);
 	CHECK(probe_patch > 0, "bad --probe-patch %d", probe_patch);
+	CHECK(text_scale >= 0 && text_scale <= 32, "bad --text-scale %d (0 = auto, max 32)",
+	      text_scale);
 
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
@@ -1030,11 +1057,12 @@ int main(int argc, char **argv)
 
 	FILE *disp = NULL;
 	if (!no_display) {
-		disp = display_open(depth_only ? S : 2 * S, S, 30);
+		disp = display_open(depth_only ? S : 2 * S, S, 30, fullscreen);
 		if (disp) {
-			printf("display          : waylandsink %dx%d BGRA (%s)\n",
+			printf("display          : waylandsink %dx%d BGRA (%s%s)\n",
 			       depth_only ? S : 2 * S, S,
-			       depth_only ? "depth only" : "camera | depth");
+			       depth_only ? "depth only" : "camera | depth",
+			       fullscreen ? ", fullscreen" : "");
 		} else {
 			fprintf(stderr, "WARN: continuing without display\n");
 		}
@@ -1145,7 +1173,7 @@ int main(int argc, char **argv)
 			} else {
 				compose_side_by_side(rgb, crop_w, crop_h, bgra, S, composite);
 				if (probe_centre) {
-					draw_probe_overlay(composite, S, probe_patch, probe_m);
+					draw_probe_overlay(composite, S, probe_patch, probe_m, text_scale);
 				}
 				frame = (const uint8_t *)composite;
 				frame_bytes = (size_t)S * 2 * S * 4;

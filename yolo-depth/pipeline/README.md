@@ -102,6 +102,8 @@ cd /dev/shm
 | `--no-pin` | off | Disable CPU pinning (see below) |
 | `--probe-centre` | off | Per-frame median metric depth of a centre patch (see below) |
 | `--probe-patch <N>` | 32 | Side of that patch, in model pixels; clamped to the model input |
+| `--text-scale <N>` | auto | Pixel size of one font dot in the overlay reading (auto = 2 below 512px, else 3) |
+| `--fullscreen` | off | Scale the display to fill the panel |
 | `--help` | | Usage with an example |
 
 Exit code 0 on success, non-zero on failure.
@@ -155,8 +157,15 @@ conditioned on; and the shipped calibration constants are not identity
 (`cal_a = 1.0` but `exp(cal_b) = 0.8237834`).
 
 ```bash
-./run.sh 384 live --probe-centre        # with the aiming overlay
+./run.sh 384 live --probe-centre --fullscreen --text-scale 6
 ```
+
+`--fullscreen` matters more than it sounds: the panel is 1920x1080 and the
+side-by-side frame is 768x384, so without it the window covers 14% of the screen
+and the reading is tiny from across a room. The compositor does the scaling, so
+it costs nothing per frame — measured 30.2 FPS either way. `--text-scale` then
+sizes the digits; 6 is comfortable at 384px, and a label too wide for its pane
+is pulled back inside rather than clipped mid-digit.
 
 Aim the centre of frame at a flat surface, put a tape measure on it, and read
 the metre value at 0.5 / 1 / 2 / 4 m. Use four distances rather than one: it
